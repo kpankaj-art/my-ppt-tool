@@ -5,6 +5,11 @@ from openpyxl.styles import PatternFill
 from pptx import Presentation
 import streamlit as st
 
+# Page Setup
+st.set_page_config(page_title="My Excel PPT Matcher", page_icon="📊", layout="centered")
+
+# --- FILE PROCESSING FUNCTIONS ---
+
 def extract_text_from_slide(slide):
     text_runs = []
     def process_shape(shape):
@@ -110,12 +115,10 @@ def process_files(pptx_bytes, excel_bytes):
     wb.save(out_excel_io)
     out_excel_io.seek(0)
 
-    return out_pptx_io, out_excel_io, len(matched_indices), unmatched_count
+    return out_pptx_io.getvalue(), out_excel_io.getvalue(), len(matched_indices), unmatched_count
 
-# Streamlit Page UI Setup
-st.set_page_config(page_title="My Excel PPT Matcher", page_icon="🔒", layout="centered")
-
-st.title("🔒 Private Excel & PPT Smart Matcher")
+# --- MAIN DASHBOARD UI ---
+st.title("📊 Excel & PPT Smart Matcher")
 st.write("Apni PPT aur Excel file upload karke match aur reorder karein.")
 
 uploaded_pptx = st.file_uploader("1. Select PowerPoint File (.pptx)", type=["pptx"])
@@ -125,26 +128,38 @@ if st.button("🚀 Process & Reorder", type="primary"):
     if uploaded_pptx and uploaded_excel:
         with st.spinner("Processing Files... Kripya wait karein..."):
             try:
-                out_pptx, out_excel, matched_cnt, missing_cnt = process_files(uploaded_pptx, uploaded_excel)
+                out_pptx_bytes, out_excel_bytes, matched_cnt, missing_cnt = process_files(uploaded_pptx, uploaded_excel)
                 
-                st.success(f"Complete! Matched Slides: {matched_cnt} | Missing Excel Rows: {missing_cnt}")
+                # Session state me processed files ko memory me store karna
+                st.session_state["out_pptx"] = out_pptx_bytes
+                st.session_state["out_excel"] = out_excel_bytes
+                st.session_state["matched_cnt"] = matched_cnt
+                st.session_state["missing_cnt"] = missing_cnt
+                st.session_state["processed"] = True
                 
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.download_button(
-                        label="📥 Download Sorted PPT",
-                        data=out_pptx,
-                        file_name="Sorted_Presentation.pptx",
-                        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
-                    )
-                with col2:
-                    st.download_button(
-                        label="📥 Download Highlighted Excel",
-                        data=out_excel,
-                        file_name="Missing_Report.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
             except Exception as e:
                 st.error(f"Error: {str(e)}")
     else:
         st.warning("Pehle dono files upload karein!")
+
+# Persistent UI: Ek file download hone par bhi doosra option screen par bana rahega
+if st.session_state.get("processed", False):
+    st.success(f"Complete! Matched Slides: {st.session_state['matched_cnt']} | Missing Excel Rows: {st.session_state['missing_cnt']}")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.download_button(
+            label="📥 Download Sorted PPT",
+            data=st.session_state["out_pptx"],
+            file_name="Sorted_Presentation.pptx",
+            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            key="btn_ppt"
+        )
+    with col2:
+        st.download_button(
+            label="📥 Download Highlighted Excel",
+            data=st.session_state["out_excel"],
+            file_name="Missing_Report.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="btn_excel"
+        )
