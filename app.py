@@ -6,7 +6,22 @@ from pptx import Presentation
 import streamlit as st
 
 # Page Setup
-st.set_page_config(page_title="My Excel PPT Matcher", page_icon="📊", layout="centered")
+st.set_page_config(page_title="Excel & PPT Smart Matcher", page_icon="📊", layout="centered")
+
+# --- HIDE STREAMLIT TOP BAR / FORK / GITHUB LOGO ---
+st.markdown("""
+    <style>
+    /* Top bar ko poori tarah hide karne ke liye */
+    [data-testid="stHeader"] {
+        display: none !important;
+    }
+    /* Main menu aur toolbar components hide karne ke liye */
+    #MainMenu {visibility: hidden;}
+    header {visibility: hidden;}
+    footer {visibility: hidden;}
+    div[class*="stAppHeader"] {display: none !important;}
+    </style>
+""", unsafe_allow_html=True)
 
 # --- FILE PROCESSING FUNCTIONS ---
 
@@ -130,7 +145,6 @@ if st.button("🚀 Process & Reorder", type="primary"):
             try:
                 out_pptx_bytes, out_excel_bytes, matched_cnt, missing_cnt = process_files(uploaded_pptx, uploaded_excel)
                 
-                # Session state me processed files ko memory me store karna
                 st.session_state["out_pptx"] = out_pptx_bytes
                 st.session_state["out_excel"] = out_excel_bytes
                 st.session_state["matched_cnt"] = matched_cnt
@@ -142,7 +156,6 @@ if st.button("🚀 Process & Reorder", type="primary"):
     else:
         st.warning("Pehle dono files upload karein!")
 
-# Persistent UI: Ek file download hone par bhi doosra option screen par bana rahega
 if st.session_state.get("processed", False):
     st.success(f"Complete! Matched Slides: {st.session_state['matched_cnt']} | Missing Excel Rows: {st.session_state['missing_cnt']}")
     
