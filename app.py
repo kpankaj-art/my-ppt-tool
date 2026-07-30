@@ -85,45 +85,48 @@ def extract_text_from_slide(slide):
         if shape.has_text_frame:
             for paragraph in shape.text_frame.paragraphs:
                 if paragraph.text:
-                    text_runs.append(paragraph.text)
+                    text_runs.append(paragraph.text.strip())
         elif shape.has_table:
             for row in shape.table.rows:
                 for cell in row.cells:
                     if cell.text:
-                        text_runs.append(cell.text)
+                        text_runs.append(cell.text.strip())
         elif shape.shape_type == 6:  # Group Shape
             for sub_shape in shape.shapes:
                 process_shape(sub_shape)
 
     for shape in slide.shapes:
         process_shape(shape)
-    return " ".join(text_runs)
+    return "\n".join(text_runs)
 
 def extract_details_from_text(text):
-    """PPT Text me se Outlet Name, Mobile, SAP Code, Width, Height extract karne ka Smart Logic"""
+    """Smart Extraction for Outlet Name, Mobile, SAP Code, Width & Height"""
     
-    # 1. Outlet Name / Name Extraction (Search specifically for 'Outlet Name:' or 'Name:')
     name = ""
-    name_match = re.search(r'(?:Outlet\s*Name|Party\s*Name|Customer\s*Name|Name)\s*[:\-]\s*([^\n\r]+)', text, re.IGNORECASE)
+    # Look specifically for Outlet Name / Party Name pattern
+    name_match = re.search(r'(?:Outlet\s*Name|Party\s*Name|Customer\s*Name|Dealer\s*Name|Shop\s*Name|Store\s*Name|Name)\s*[:\-]\s*([^\n\r]+)', text, re.IGNORECASE)
+    
     if name_match:
         name = name_match.group(1).strip()
-        # Clean extra trailing details if any
-        name = re.split(r'(?:Address|Contact|City|Date|Qty|Size|Type)', name, flags=re.IGNORECASE)[0].strip()
+        # Clean extra labels if pasted in same line
+        name = re.split(r'(?:Address|Contact|City|Date|Qty|Size|Type|Width|Height)', name, flags=re.IGNORECASE)[0].strip()
     else:
-        # Fallback if prefix is missing: Take first non-empty line
+        # Fallback: Find lines that are not labels
         lines = [line.strip() for line in text.splitlines() if line.strip()]
-        if lines:
-            name = lines[0][:40]
+        for l in lines:
+            if not any(k in l.lower() for k in ['qty', 'size', 'type', 'contact', 'address', 'city', 'date', 'width', 'height']):
+                name = l[:40].strip()
+                break
 
-    # 2. Find 10 digit Mobile Number
+    # Find 10 digit Mobile Number
     mob_match = re.search(r'\b[6-9]\d{9}\b', text)
     mobile = mob_match.group(0) if mob_match else ""
 
-    # 3. Find SAP Code (6 to 10 digit numbers excluding mobile)
+    # Find SAP Code
     sap_match = re.search(r'\b\d{6,10}\b', text)
     sap = sap_match.group(0) if sap_match and sap_match.group(0) != mobile else ""
 
-    # 4. Find Width x Height (e.g. 132 x 214 or 10x20)
+    # Find Width x Height
     dim_match = re.search(r'(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)', text, re.IGNORECASE)
     w = dim_match.group(1) if dim_match else ""
     h = dim_match.group(2) if dim_match else ""
@@ -135,11 +138,12 @@ def process_files_with_progress(pptx_bytes, excel_bytes, progress_bar, status_te
     progress_bar.progress(10)
     df = pd.read_excel(excel_bytes, dtype=str)
     
-    col_mobile = next((c for c in df.columns if 'mobile' in str(c).lower() or 'contact' in str(c).lower()), None)
-    col_sap = next((c for c in df.columns if 'sap' in str(c).lower() or 'code' in str(c).lower()), None)
-    col_name = next((c for c in df.columns if 'name' in str(c).lower() or 'party' in str(c).lower() or 'outlet' in str(c).lower() or 'customer' in str(c).lower()), None)
-    col_width = next((c for c in df.columns if 'width' in str(c).lower()), None)
-    col_height = next((c for c in df.columns if 'height' in str(c).lower()), None)
+    # Advanced Column Detection
+    col_mobile = next((c for c in df.columns if any(k in str(c).lower() for k in ['mobile', 'contact', 'phone', 'num'])), None)
+    col_sap = next((c for c in df.columns if any(k in str(c).lower() for k in ['sap', 'code', 'dealer_code', 'id'])), None)
+    col_name = next((c for c in df.columns if any(k in str(c).lower() for k in ['outlet', 'party', 'customer', 'dealer', 'shop', 'store', 'name'])), None)
+    col_width = next((c for c in df.columns if 'width' in str(c).lower() or 'w' == str(c).strip().lower()), None)
+    col_height = next((c for c in df.columns if 'height' in str(c).lower() or 'h' == str(c).strip().lower()), None)
 
     excel_criteria = []
     for idx, row in df.iterrows():
@@ -258,16 +262,28 @@ def process_files_with_progress(pptx_bytes, excel_bytes, progress_bar, status_te
 
         new_row_idx = ws.max_row + 1
 
+        # Direct Column Mapping for Extra Rows
         if col_name:
-            ws.cell(row=new_row_idx, column=df.columns.get_loc(col_name) + 1, value=ext_name)
+            c_idx = df.columns.get_loc(col_name) + 1
+            ws.cell(row=new_row_idx, column=c_idx, value=ext_name)
+        elif len(headers) >= 1:
+            ws.cell(row=new_row_idx, column=1, value=ext_name)
+
         if col_mobile:
-            ws.cell(row=new_row_idx, column=df.columns.get_loc(col_mobile) + 1, value=ext_mob)
+            c_idx = df.columns.get_loc(col_mobile) + 1
+            ws.cell(row=new_row_idx, column=c_idx, value=ext_mob)
+
         if col_sap:
-            ws.cell(row=new_row_idx, column=df.columns.get_loc(col_sap) + 1, value=ext_sap)
+            c_idx = df.columns.get_loc(col_sap) + 1
+            ws.cell(row=new_row_idx, column=c_idx, value=ext_sap)
+
         if col_width:
-            ws.cell(row=new_row_idx, column=df.columns.get_loc(col_width) + 1, value=ext_w)
+            c_idx = df.columns.get_loc(col_width) + 1
+            ws.cell(row=new_row_idx, column=c_idx, value=ext_w)
+
         if col_height:
-            ws.cell(row=new_row_idx, column=df.columns.get_loc(col_height) + 1, value=ext_h)
+            c_idx = df.columns.get_loc(col_height) + 1
+            ws.cell(row=new_row_idx, column=c_idx, value=ext_h)
 
         ws.cell(row=new_row_idx, column=remark_col_num, value="ye ppt me extra hai")
 
