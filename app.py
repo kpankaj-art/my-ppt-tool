@@ -1,5 +1,6 @@
 import io
 import re
+import time
 import pandas as pd
 import openpyxl
 from openpyxl.styles import PatternFill
@@ -7,18 +8,80 @@ from pptx import Presentation
 import streamlit as st
 
 # Page Setup
-st.set_page_config(page_title="Excel & PPT Smart Matcher", page_icon="📊", layout="centered")
+st.set_page_config(page_title="Pro PPT & Excel Matcher", page_icon="⚡", layout="centered")
 
-# --- HIDE STREAMLIT TOP BAR / FORK / GITHUB LOGO ---
+# --- PROFESSIONAL UI & CUSTOM CSS ---
 st.markdown("""
     <style>
-    [data-testid="stHeader"] {
-        display: none !important;
+    /* Hide Streamlit Default Elements */
+    [data-testid="stHeader"] { display: none !important; }
+    #MainMenu { visibility: hidden; }
+    header { visibility: hidden; }
+    footer { visibility: hidden; }
+    div[class*="stAppHeader"] { display: none !important; }
+
+    /* Background and Layout */
+    .main {
+        background-color: #0e1117;
     }
-    #MainMenu {visibility: hidden;}
-    header {visibility: hidden;}
-    footer {visibility: hidden;}
-    div[class*="stAppHeader"] {display: none !important;}
+    
+    /* Professional Card Styling */
+    .css-card {
+        background: linear-gradient(135deg, #1e2638 0%, #111827 100%);
+        border: 1px solid #374151;
+        border-radius: 12px;
+        padding: 24px;
+        margin-bottom: 20px;
+        box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
+    }
+    
+    /* Custom Titles */
+    .title-text {
+        font-family: 'Inter', sans-serif;
+        font-size: 28px;
+        font-weight: 700;
+        color: #f9fafb;
+        margin-bottom: 8px;
+    }
+    .subtitle-text {
+        font-size: 14px;
+        color: #9ca3af;
+        margin-bottom: 24px;
+    }
+    
+    /* Metric Cards */
+    .metric-container {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        margin-top: 15px;
+        margin-bottom: 15px;
+    }
+    .metric-box {
+        background: #1f2937;
+        border-radius: 8px;
+        padding: 12px 16px;
+        text-align: center;
+        flex: 1;
+        border: 1px solid #374151;
+    }
+    .metric-value {
+        font-size: 20px;
+        font-weight: 700;
+    }
+    .metric-label {
+        font-size: 12px;
+        color: #9ca3af;
+        margin-top: 4px;
+    }
+    
+    /* Download Buttons */
+    .stDownloadButton > button {
+        width: 100%;
+        border-radius: 8px;
+        font-weight: 600;
+        height: 48px;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -29,11 +92,13 @@ def extract_text_from_slide(slide):
     def process_shape(shape):
         if shape.has_text_frame:
             for paragraph in shape.text_frame.paragraphs:
-                text_runs.append(paragraph.text)
+                if paragraph.text:
+                    text_runs.append(paragraph.text)
         elif shape.has_table:
             for row in shape.table.rows:
                 for cell in row.cells:
-                    text_runs.append(cell.text)
+                    if cell.text:
+                        text_runs.append(cell.text)
         elif shape.shape_type == 6:  # Group Shape
             for sub_shape in shape.shapes:
                 process_shape(sub_shape)
@@ -43,28 +108,25 @@ def extract_text_from_slide(slide):
     return " ".join(text_runs)
 
 def extract_details_from_text(text):
-    """Extra slide me se mobile, sap code, width, height, aur name dhoondne ke liye"""
-    # Find 10 digit mobile number
     mob_match = re.search(r'\b\d{10}\b', text)
     mobile = mob_match.group(0) if mob_match else ""
 
-    # Find SAP Code (6 to 10 digit numbers)
     sap_match = re.search(r'\b\d{6,10}\b', text)
     sap = sap_match.group(0) if sap_match and sap_match.group(0) != mobile else ""
 
-    # Find Width x Height (e.g. 10x20 or 10.5x20)
     dim_match = re.search(r'(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)', text, re.IGNORECASE)
     w = dim_match.group(1) if dim_match else ""
     h = dim_match.group(2) if dim_match else ""
 
-    # Name cleanup
     name = text.split("\n")[0][:30].strip() if text else "Extra Slide Item"
     return name, mobile, sap, w, h
 
-def process_files(pptx_bytes, excel_bytes):
+def process_files_with_progress(pptx_bytes, excel_bytes, progress_bar, status_text):
+    # Step 1: Read Excel
+    status_text.markdown("⏳ **Reading Excel Data...**")
+    progress_bar.progress(10)
     df = pd.read_excel(excel_bytes, dtype=str)
     
-    # Identify Column Names Dynamically
     col_mobile = next((c for c in df.columns if 'mobile' in str(c).lower()), None)
     col_sap = next((c for c in df.columns if 'sap' in str(c).lower() or 'code' in str(c).lower()), None)
     col_name = next((c for c in df.columns if 'name' in str(c).lower() or 'party' in str(c).lower() or 'customer' in str(c).lower()), None)
@@ -80,55 +142,54 @@ def process_files(pptx_bytes, excel_bytes):
         h = str(row[col_height]).split('.')[0].strip() if col_height and pd.notna(row[col_height]) else ""
         
         excel_criteria.append({
-            'row_idx': idx, 
-            'mobile': mob, 
-            'sap': sap, 
-            'name': name, 
-            'width': w, 
-            'height': h
+            'row_idx': idx, 'mobile': mob, 'sap': sap, 'name': name, 'width': w, 'height': h
         })
 
+    # Step 2: Read PPT
+    status_text.markdown("⏳ **Analyzing Presentation Slides...**")
+    progress_bar.progress(25)
     prs = Presentation(pptx_bytes)
     slides = list(prs.slides)
-    raw_slide_texts = [extract_text_from_slide(slide) for slide in slides]
+    total_slides = len(slides)
+    
+    raw_slide_texts = []
+    for idx, slide in enumerate(slides):
+        raw_slide_texts.append(extract_text_from_slide(slide))
+        # Incremental progress while loading slides
+        curr_p = 25 + int((idx + 1) / total_slides * 20)
+        progress_bar.progress(min(curr_p, 45))
+        
     slide_texts_lower = [t.lower() for t in raw_slide_texts]
 
+    # Step 3: Match Criteria
+    status_text.markdown("⏳ **Matching Criteria (Mobile, SAP & Name)...**")
     matched_indices = []
     seen_slides = set()
     matched_excel_rows = set()
 
-    # Step 1: Matching Logic (Mobile -> SAP Code -> Name)
-    for item in excel_criteria:
+    total_items = len(excel_criteria)
+    for i, item in enumerate(excel_criteria):
         row_idx = item['row_idx']
-        mob = item['mobile'].lower()
-        sap = item['sap'].lower()
-        name = item['name'].lower()
-        w = item['width'].lower()
-        h = item['height'].lower()
+        mob, sap, name = item['mobile'].lower(), item['sap'].lower(), item['name'].lower()
+        w, h = item['width'].lower(), item['height'].lower()
 
         best_match_idx = None
-
         for idx, text in enumerate(slide_texts_lower):
             if idx in seen_slides:
                 continue
 
-            # 1st Preference: Mobile Number Match
             if mob and mob != 'nan' and mob in text:
                 if w and h and (w in text and h in text):
                     best_match_idx = idx
                     break
                 elif not best_match_idx:
                     best_match_idx = idx
-
-            # 2nd Preference: SAP Code Match
             elif sap and sap != 'nan' and sap in text:
                 if w and h and (w in text and h in text):
                     best_match_idx = idx
                     break
                 elif not best_match_idx:
                     best_match_idx = idx
-
-            # 3rd Preference: Name Match
             elif name and name != 'nan' and len(name) > 2 and name in text:
                 best_match_idx = idx
                 break
@@ -138,18 +199,22 @@ def process_files(pptx_bytes, excel_bytes):
             seen_slides.add(best_match_idx)
             matched_excel_rows.add(row_idx)
 
-    # Step 2: Reorder slides in PPT
-    # Matched slides upar aayenge, remaining extra slides niche automatic chali jayengi
+        # Progress calculation for matching phase (45% to 75%)
+        curr_p = 45 + int((i + 1) / total_items * 30)
+        progress_bar.progress(min(curr_p, 75))
+
+    # Step 4: Reorder PPT
+    status_text.markdown("⏳ **Reordering PPT Slides...**")
+    progress_bar.progress(80)
+    
     sldIdLst = prs.slides._sldIdLst
     original_sldIds = list(sldIdLst)
     for sldId in original_sldIds:
         sldIdLst.remove(sldId)
 
-    # Add matched slides first
     for idx in matched_indices:
         sldIdLst.append(original_sldIds[idx])
 
-    # Unmatched / Extra slides in PPT (added at bottom)
     unmatched_slide_indices = []
     for idx, sldId in enumerate(original_sldIds):
         if idx not in matched_indices:
@@ -160,11 +225,13 @@ def process_files(pptx_bytes, excel_bytes):
     prs.save(out_pptx_io)
     out_pptx_io.seek(0)
 
-    # Step 3: Excel Modification (Red for Missing, Green for Extra PPT Slides)
+    # Step 5: Highlight & Format Excel
+    status_text.markdown("⏳ **Generating Final Excel Report...**")
+    progress_bar.progress(90)
+    
     wb = openpyxl.load_workbook(excel_bytes)
     ws = wb.active
 
-    # Check or create Remark Column
     headers = [cell.value for cell in ws[1]]
     remark_col_num = len(headers) + 1
     ws.cell(row=1, column=remark_col_num, value="Remark")
@@ -172,7 +239,6 @@ def process_files(pptx_bytes, excel_bytes):
     red_fill = PatternFill(start_color="FF9999", end_color="FF9999", fill_type="solid")
     green_fill = PatternFill(start_color="99FF99", end_color="99FF99", fill_type="solid")
 
-    # Highlight Missing Excel Rows in Red
     missing_count = 0
     for idx, row in enumerate(df.iterrows()):
         excel_row_num = idx + 2
@@ -182,7 +248,6 @@ def process_files(pptx_bytes, excel_bytes):
                 ws.cell(row=excel_row_num, column=col_num).fill = red_fill
             ws.cell(row=excel_row_num, column=remark_col_num, value="Not Found in PPT")
 
-    # Append Extra PPT Slides at Bottom of Excel with Green Highlight
     extra_count = 0
     for s_idx in unmatched_slide_indices:
         extra_count += 1
@@ -191,26 +256,19 @@ def process_files(pptx_bytes, excel_bytes):
 
         new_row_idx = ws.max_row + 1
 
-        # Populate Extracted Data into correct columns if available
         if col_name:
-            c_idx = df.columns.get_loc(col_name) + 1
-            ws.cell(row=new_row_idx, column=c_idx, value=ext_name)
+            ws.cell(row=new_row_idx, column=df.columns.get_loc(col_name) + 1, value=ext_name)
         if col_mobile:
-            c_idx = df.columns.get_loc(col_mobile) + 1
-            ws.cell(row=new_row_idx, column=c_idx, value=ext_mob)
+            ws.cell(row=new_row_idx, column=df.columns.get_loc(col_mobile) + 1, value=ext_mob)
         if col_sap:
-            c_idx = df.columns.get_loc(col_sap) + 1
-            ws.cell(row=new_row_idx, column=c_idx, value=ext_sap)
+            ws.cell(row=new_row_idx, column=df.columns.get_loc(col_sap) + 1, value=ext_sap)
         if col_width:
-            c_idx = df.columns.get_loc(col_width) + 1
-            ws.cell(row=new_row_idx, column=c_idx, value=ext_w)
+            ws.cell(row=new_row_idx, column=df.columns.get_loc(col_width) + 1, value=ext_w)
         if col_height:
-            c_idx = df.columns.get_loc(col_height) + 1
-            ws.cell(row=new_row_idx, column=c_idx, value=ext_h)
+            ws.cell(row=new_row_idx, column=df.columns.get_loc(col_height) + 1, value=ext_h)
 
         ws.cell(row=new_row_idx, column=remark_col_num, value="ye ppt me extra hai")
 
-        # Color entire new row green
         for col_num in range(1, remark_col_num + 1):
             ws.cell(row=new_row_idx, column=col_num).fill = green_fill
 
@@ -218,36 +276,74 @@ def process_files(pptx_bytes, excel_bytes):
     wb.save(out_excel_io)
     out_excel_io.seek(0)
 
+    # Done
+    progress_bar.progress(100)
+    status_text.markdown("✅ **Processing Complete!**")
+    time.sleep(0.5)
+
     return out_pptx_io.getvalue(), out_excel_io.getvalue(), len(matched_indices), missing_count, extra_count
 
-# --- MAIN DASHBOARD UI ---
-st.title("📊 Excel & PPT Smart Matcher")
-st.write("Apni PPT aur Excel file upload karke match aur reorder karein.")
+# --- MAIN INTERFACE ---
 
-uploaded_pptx = st.file_uploader("1. Select PowerPoint File (.pptx)", type=["pptx"])
-uploaded_excel = st.file_uploader("2. Select Excel File (.xlsx)", type=["xlsx", "xls"])
+st.markdown("""
+    <div class="css-card">
+        <div class="title-text">⚡ Smart PPT & Excel Matcher Pro</div>
+        <div class="subtitle-text">Match, reorder, and sync your presentation slides with Excel data seamlessly.</div>
+    </div>
+""", unsafe_allow_html=True)
 
-if st.button("🚀 Process & Reorder", type="primary"):
+uploaded_pptx = st.file_uploader("1. Upload PowerPoint Presentation (.pptx)", type=["pptx"])
+uploaded_excel = st.file_uploader("2. Upload Master Excel File (.xlsx)", type=["xlsx", "xls"])
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+if st.button("🚀 Process & Sync Files", type="primary", use_container_width=True):
     if uploaded_pptx and uploaded_excel:
-        with st.spinner("Processing Files... Kripya wait karein..."):
-            try:
-                out_pptx_bytes, out_excel_bytes, matched_cnt, missing_cnt, extra_cnt = process_files(uploaded_pptx, uploaded_excel)
-                
-                st.session_state["out_pptx"] = out_pptx_bytes
-                st.session_state["out_excel"] = out_excel_bytes
-                st.session_state["matched_cnt"] = matched_cnt
-                st.session_state["missing_cnt"] = missing_cnt
-                st.session_state["extra_cnt"] = extra_cnt
-                st.session_state["processed"] = True
-                
-            except Exception as e:
-                st.error(f"Error: {str(e)}")
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        try:
+            out_pptx_bytes, out_excel_bytes, matched_cnt, missing_cnt, extra_cnt = process_files_with_progress(
+                uploaded_pptx, uploaded_excel, progress_bar, status_text
+            )
+            
+            st.session_state["out_pptx"] = out_pptx_bytes
+            st.session_state["out_excel"] = out_excel_bytes
+            st.session_state["matched_cnt"] = matched_cnt
+            st.session_state["missing_cnt"] = missing_cnt
+            st.session_state["extra_cnt"] = extra_cnt
+            st.session_state["processed"] = True
+            
+            # Clear progress UI elements after completion
+            status_text.empty()
+            progress_bar.empty()
+            
+        except Exception as e:
+            status_text.empty()
+            progress_bar.empty()
+            st.error(f"❌ Error during processing: {str(e)}")
     else:
-        st.warning("Pehle dono files upload karein!")
+        st.warning("⚠️ Kripya dono PowerPoint aur Excel files upload karein!")
 
+# --- DISPLAY RESULTS & DOWNLOADS ---
 if st.session_state.get("processed", False):
-    st.success(f"Complete! Matched: {st.session_state['matched_cnt']} | Missing in PPT (Red): {st.session_state['missing_cnt']} | Extra in PPT (Green): {st.session_state['extra_cnt']}")
-    
+    st.markdown(f"""
+        <div class="metric-container">
+            <div class="metric-box">
+                <div class="metric-value" style="color: #34d399;">{st.session_state['matched_cnt']}</div>
+                <div class="metric-label">Matched Slides</div>
+            </div>
+            <div class="metric-box">
+                <div class="metric-value" style="color: #f87171;">{st.session_state['missing_cnt']}</div>
+                <div class="metric-label">Missing (Red)</div>
+            </div>
+            <div class="metric-box">
+                <div class="metric-value" style="color: #60a5fa;">{st.session_state['extra_cnt']}</div>
+                <div class="metric-label">Extra PPT (Green)</div>
+            </div>
+        </div>
+    """, unsafe_allow_html=True)
+
     col1, col2 = st.columns(2)
     with col1:
         st.download_button(
@@ -259,7 +355,7 @@ if st.session_state.get("processed", False):
         )
     with col2:
         st.download_button(
-            label="📥 Download Highlighted Excel",
+            label="📥 Download Updated Excel",
             data=st.session_state["out_excel"],
             file_name="Missing_Report.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
