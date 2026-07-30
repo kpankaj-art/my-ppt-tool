@@ -13,19 +13,14 @@ st.set_page_config(page_title="Pro PPT & Excel Matcher", page_icon="⚡", layout
 # --- PROFESSIONAL UI & CUSTOM CSS ---
 st.markdown("""
     <style>
-    /* Hide Streamlit Default Elements */
     [data-testid="stHeader"] { display: none !important; }
     #MainMenu { visibility: hidden; }
     header { visibility: hidden; }
     footer { visibility: hidden; }
     div[class*="stAppHeader"] { display: none !important; }
 
-    /* Background and Layout */
-    .main {
-        background-color: #0e1117;
-    }
+    .main { background-color: #0e1117; }
     
-    /* Professional Card Styling */
     .css-card {
         background: linear-gradient(135deg, #1e2638 0%, #111827 100%);
         border: 1px solid #374151;
@@ -35,7 +30,6 @@ st.markdown("""
         box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
     }
     
-    /* Custom Titles */
     .title-text {
         font-family: 'Inter', sans-serif;
         font-size: 28px;
@@ -49,7 +43,6 @@ st.markdown("""
         margin-bottom: 24px;
     }
     
-    /* Metric Cards */
     .metric-container {
         display: flex;
         justify-content: space-between;
@@ -75,7 +68,6 @@ st.markdown("""
         margin-top: 4px;
     }
     
-    /* Download Buttons */
     .stDownloadButton > button {
         width: 100%;
         border-radius: 8px;
@@ -108,28 +100,44 @@ def extract_text_from_slide(slide):
     return " ".join(text_runs)
 
 def extract_details_from_text(text):
-    mob_match = re.search(r'\b\d{10}\b', text)
+    """PPT Text me se Outlet Name, Mobile, SAP Code, Width, Height extract karne ka Smart Logic"""
+    
+    # 1. Outlet Name / Name Extraction (Search specifically for 'Outlet Name:' or 'Name:')
+    name = ""
+    name_match = re.search(r'(?:Outlet\s*Name|Party\s*Name|Customer\s*Name|Name)\s*[:\-]\s*([^\n\r]+)', text, re.IGNORECASE)
+    if name_match:
+        name = name_match.group(1).strip()
+        # Clean extra trailing details if any
+        name = re.split(r'(?:Address|Contact|City|Date|Qty|Size|Type)', name, flags=re.IGNORECASE)[0].strip()
+    else:
+        # Fallback if prefix is missing: Take first non-empty line
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if lines:
+            name = lines[0][:40]
+
+    # 2. Find 10 digit Mobile Number
+    mob_match = re.search(r'\b[6-9]\d{9}\b', text)
     mobile = mob_match.group(0) if mob_match else ""
 
+    # 3. Find SAP Code (6 to 10 digit numbers excluding mobile)
     sap_match = re.search(r'\b\d{6,10}\b', text)
     sap = sap_match.group(0) if sap_match and sap_match.group(0) != mobile else ""
 
+    # 4. Find Width x Height (e.g. 132 x 214 or 10x20)
     dim_match = re.search(r'(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)', text, re.IGNORECASE)
     w = dim_match.group(1) if dim_match else ""
     h = dim_match.group(2) if dim_match else ""
 
-    name = text.split("\n")[0][:30].strip() if text else "Extra Slide Item"
     return name, mobile, sap, w, h
 
 def process_files_with_progress(pptx_bytes, excel_bytes, progress_bar, status_text):
-    # Step 1: Read Excel
     status_text.markdown("⏳ **Reading Excel Data...**")
     progress_bar.progress(10)
     df = pd.read_excel(excel_bytes, dtype=str)
     
-    col_mobile = next((c for c in df.columns if 'mobile' in str(c).lower()), None)
+    col_mobile = next((c for c in df.columns if 'mobile' in str(c).lower() or 'contact' in str(c).lower()), None)
     col_sap = next((c for c in df.columns if 'sap' in str(c).lower() or 'code' in str(c).lower()), None)
-    col_name = next((c for c in df.columns if 'name' in str(c).lower() or 'party' in str(c).lower() or 'customer' in str(c).lower()), None)
+    col_name = next((c for c in df.columns if 'name' in str(c).lower() or 'party' in str(c).lower() or 'outlet' in str(c).lower() or 'customer' in str(c).lower()), None)
     col_width = next((c for c in df.columns if 'width' in str(c).lower()), None)
     col_height = next((c for c in df.columns if 'height' in str(c).lower()), None)
 
@@ -145,7 +153,6 @@ def process_files_with_progress(pptx_bytes, excel_bytes, progress_bar, status_te
             'row_idx': idx, 'mobile': mob, 'sap': sap, 'name': name, 'width': w, 'height': h
         })
 
-    # Step 2: Read PPT
     status_text.markdown("⏳ **Analyzing Presentation Slides...**")
     progress_bar.progress(25)
     prs = Presentation(pptx_bytes)
@@ -155,13 +162,11 @@ def process_files_with_progress(pptx_bytes, excel_bytes, progress_bar, status_te
     raw_slide_texts = []
     for idx, slide in enumerate(slides):
         raw_slide_texts.append(extract_text_from_slide(slide))
-        # Incremental progress while loading slides
         curr_p = 25 + int((idx + 1) / total_slides * 20)
         progress_bar.progress(min(curr_p, 45))
         
     slide_texts_lower = [t.lower() for t in raw_slide_texts]
 
-    # Step 3: Match Criteria
     status_text.markdown("⏳ **Matching Criteria (Mobile, SAP & Name)...**")
     matched_indices = []
     seen_slides = set()
@@ -199,11 +204,9 @@ def process_files_with_progress(pptx_bytes, excel_bytes, progress_bar, status_te
             seen_slides.add(best_match_idx)
             matched_excel_rows.add(row_idx)
 
-        # Progress calculation for matching phase (45% to 75%)
         curr_p = 45 + int((i + 1) / total_items * 30)
         progress_bar.progress(min(curr_p, 75))
 
-    # Step 4: Reorder PPT
     status_text.markdown("⏳ **Reordering PPT Slides...**")
     progress_bar.progress(80)
     
@@ -225,7 +228,6 @@ def process_files_with_progress(pptx_bytes, excel_bytes, progress_bar, status_te
     prs.save(out_pptx_io)
     out_pptx_io.seek(0)
 
-    # Step 5: Highlight & Format Excel
     status_text.markdown("⏳ **Generating Final Excel Report...**")
     progress_bar.progress(90)
     
@@ -276,7 +278,6 @@ def process_files_with_progress(pptx_bytes, excel_bytes, progress_bar, status_te
     wb.save(out_excel_io)
     out_excel_io.seek(0)
 
-    # Done
     progress_bar.progress(100)
     status_text.markdown("✅ **Processing Complete!**")
     time.sleep(0.5)
@@ -314,7 +315,6 @@ if st.button("🚀 Process & Sync Files", type="primary", use_container_width=Tr
             st.session_state["extra_cnt"] = extra_cnt
             st.session_state["processed"] = True
             
-            # Clear progress UI elements after completion
             status_text.empty()
             progress_bar.empty()
             
