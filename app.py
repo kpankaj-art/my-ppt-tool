@@ -79,6 +79,36 @@ st.markdown("""
 
 # --- HELPER FUNCTIONS ---
 
+def load_any_excel_file(uploaded_file):
+    """Universal File Reader for .xlsx, .xls, .xlsm, .csv"""
+    filename = uploaded_file.name.lower()
+    file_bytes = uploaded_file.getvalue()
+    
+    if filename.endswith('.csv'):
+        df = pd.read_csv(io.BytesIO(file_bytes), dtype=str)
+    else:
+        # Tries multiple engines to avoid format errors like xlrd missing
+        try:
+            df = pd.read_excel(io.BytesIO(file_bytes), dtype=str)
+        except Exception:
+            try:
+                df = pd.read_excel(io.BytesIO(file_bytes), engine='openpyxl', dtype=str)
+            except Exception:
+                df = pd.read_excel(io.BytesIO(file_bytes), engine='xlrd', dtype=str)
+                
+    # Convert DataFrame to openpyxl workbook in memory for unified styling/report generation
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    
+    # Write Headers
+    ws.append(list(df.columns))
+    
+    # Write Data Rows
+    for row in df.itertuples(index=False):
+        ws.append(list(row))
+        
+    return df, wb
+
 def extract_text_from_slide(slide):
     text_runs = []
     def process_shape(shape):
@@ -99,67 +129,98 @@ def extract_text_from_slide(slide):
         process_shape(shape)
     return "\n".join(text_runs)
 
+def update_slide_size(slide, new_size_str):
+    if not new_size_str:
+        return
+
+    def replace_in_text_frame(tf):
+        for paragraph in tf.paragraphs:
+            p_text = paragraph.text
+            if any(k in p_text.lower() for k in ["size", "qty", "type", "width", "height", "dimension"]):
+                if re.search(r'Size\s*[:\-]\s*[^\n\r]+', p_text, re.IGNORECASE):
+                    paragraph.text = re.sub(r'(Size\s*[:\-]\s*)[^\n\r]+', rf'\1{new_size_str}', p_text, flags=re.IGNORECASE)
+                elif re.search(r'\b\d+(?:\.\d+)?\s*x\s*\d+(?:\.\d+)?(?:ft|f|in)?\b', p_text, re.IGNORECASE):
+                    paragraph.text = re.sub(r'\b\d+(?:\.\d+)?\s*x\s*\d+(?:\.\d+)?(?:ft|f|in)?\b', new_size_str, p_text, flags=re.IGNORECASE)
+
+    def process_shape_update(shape):
+        if shape.has_text_frame:
+            replace_in_text_frame(shape.text_frame)
+        elif shape.has_table:
+            for row in shape.table.rows:
+                for cell in row.cells:
+                    if cell.text_frame:
+                        replace_in_text_frame(cell.text_frame)
+        elif shape.shape_type == 6:  # Group Shape
+            for sub_shape in shape.shapes:
+                process_shape_update(sub_shape)
+
+    for shape in slide.shapes:
+        process_shape_update(shape)
+
 def extract_details_from_text(text):
-    """Smart Extraction for Outlet Name, Mobile, SAP Code, Width & Height"""
-    
     name = ""
-    # Look specifically for Outlet Name / Party Name pattern
     name_match = re.search(r'(?:Outlet\s*Name|Party\s*Name|Customer\s*Name|Dealer\s*Name|Shop\s*Name|Store\s*Name|Name)\s*[:\-]\s*([^\n\r]+)', text, re.IGNORECASE)
     
     if name_match:
         name = name_match.group(1).strip()
-        # Clean extra labels if pasted in same line
         name = re.split(r'(?:Address|Contact|City|Date|Qty|Size|Type|Width|Height)', name, flags=re.IGNORECASE)[0].strip()
     else:
-        # Fallback: Find lines that are not labels
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         for l in lines:
             if not any(k in l.lower() for k in ['qty', 'size', 'type', 'contact', 'address', 'city', 'date', 'width', 'height']):
                 name = l[:40].strip()
                 break
 
-    # Find 10 digit Mobile Number
     mob_match = re.search(r'\b[6-9]\d{9}\b', text)
     mobile = mob_match.group(0) if mob_match else ""
 
-    # Find SAP Code
     sap_match = re.search(r'\b\d{6,10}\b', text)
     sap = sap_match.group(0) if sap_match and sap_match.group(0) != mobile else ""
 
-    # Find Width x Height
     dim_match = re.search(r'(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)', text, re.IGNORECASE)
     w = dim_match.group(1) if dim_match else ""
     h = dim_match.group(2) if dim_match else ""
 
     return name, mobile, sap, w, h
 
-def process_files_with_progress(pptx_bytes, excel_bytes, progress_bar, status_text):
-    status_text.markdown("⏳ **Reading Excel Data...**")
+def process_files_with_progress(pptx_file, excel_file, progress_bar, status_text):
+    status_text.markdown("⏳ **Reading Excel Data (Any Format)...**")
     progress_bar.progress(10)
-    df = pd.read_excel(excel_bytes, dtype=str)
     
-    # Advanced Column Detection
+    # Universal Excel Reading
+    df, wb = load_any_excel_file(excel_file)
+    
+    # Column Identification
     col_mobile = next((c for c in df.columns if any(k in str(c).lower() for k in ['mobile', 'contact', 'phone', 'num'])), None)
     col_sap = next((c for c in df.columns if any(k in str(c).lower() for k in ['sap', 'code', 'dealer_code', 'id'])), None)
     col_name = next((c for c in df.columns if any(k in str(c).lower() for k in ['outlet', 'party', 'customer', 'dealer', 'shop', 'store', 'name'])), None)
+    col_city = next((c for c in df.columns if any(k in str(c).lower() for k in ['city', 'location', 'address', 'town', 'place'])), None)
     col_width = next((c for c in df.columns if 'width' in str(c).lower() or 'w' == str(c).strip().lower()), None)
     col_height = next((c for c in df.columns if 'height' in str(c).lower() or 'h' == str(c).strip().lower()), None)
+    col_size = next((c for c in df.columns if 'size' in str(c).lower() or 'dimension' in str(c).lower()), None)
 
     excel_criteria = []
     for idx, row in df.iterrows():
         mob = str(row[col_mobile]).split('.')[0].strip() if col_mobile and pd.notna(row[col_mobile]) else ""
         sap = str(row[col_sap]).split('.')[0].strip() if col_sap and pd.notna(row[col_sap]) else ""
         name = str(row[col_name]).strip() if col_name and pd.notna(row[col_name]) else ""
+        city = str(row[col_city]).strip() if col_city and pd.notna(row[col_city]) else ""
         w = str(row[col_width]).split('.')[0].strip() if col_width and pd.notna(row[col_width]) else ""
         h = str(row[col_height]).split('.')[0].strip() if col_height and pd.notna(row[col_height]) else ""
         
+        size_str = ""
+        if col_size and pd.notna(row[col_size]):
+            size_str = str(row[col_size]).strip()
+        elif w or h:
+            size_str = f"W-{w} H-{h}" if w and h else (w or h)
+
         excel_criteria.append({
-            'row_idx': idx, 'mobile': mob, 'sap': sap, 'name': name, 'width': w, 'height': h
+            'row_idx': idx, 'mobile': mob, 'sap': sap, 'name': name, 'city': city, 'width': w, 'height': h, 'size_str': size_str
         })
 
     status_text.markdown("⏳ **Analyzing Presentation Slides...**")
     progress_bar.progress(25)
-    prs = Presentation(pptx_bytes)
+    prs = Presentation(pptx_file)
     slides = list(prs.slides)
     total_slides = len(slides)
     
@@ -171,7 +232,7 @@ def process_files_with_progress(pptx_bytes, excel_bytes, progress_bar, status_te
         
     slide_texts_lower = [t.lower() for t in raw_slide_texts]
 
-    status_text.markdown("⏳ **Matching Criteria (Mobile, SAP & Name)...**")
+    status_text.markdown("⏳ **Smart Matching & Updating PPT Sizes...**")
     matched_indices = []
     seen_slides = set()
     matched_excel_rows = set()
@@ -179,34 +240,52 @@ def process_files_with_progress(pptx_bytes, excel_bytes, progress_bar, status_te
     total_items = len(excel_criteria)
     for i, item in enumerate(excel_criteria):
         row_idx = item['row_idx']
-        mob, sap, name = item['mobile'].lower(), item['sap'].lower(), item['name'].lower()
+        mob, sap = item['mobile'].lower(), item['sap'].lower()
+        name, city = item['name'].lower(), item['city'].lower()
         w, h = item['width'].lower(), item['height'].lower()
+        size_str = item['size_str']
 
         best_match_idx = None
-        for idx, text in enumerate(slide_texts_lower):
-            if idx in seen_slides:
-                continue
 
-            if mob and mob != 'nan' and mob in text:
-                if w and h and (w in text and h in text):
+        if mob and mob != 'nan':
+            for idx, text in enumerate(slide_texts_lower):
+                if idx not in seen_slides and mob in text:
                     best_match_idx = idx
                     break
-                elif not best_match_idx:
-                    best_match_idx = idx
-            elif sap and sap != 'nan' and sap in text:
-                if w and h and (w in text and h in text):
+
+        if best_match_idx is None and sap and sap != 'nan':
+            for idx, text in enumerate(slide_texts_lower):
+                if idx not in seen_slides and sap in text:
                     best_match_idx = idx
                     break
-                elif not best_match_idx:
+
+        if best_match_idx is None and name and name != 'nan' and len(name) > 2:
+            if city and city != 'nan':
+                for idx, text in enumerate(slide_texts_lower):
+                    if idx not in seen_slides and name in text and city in text:
+                        best_match_idx = idx
+                        break
+
+        if best_match_idx is None and name and name != 'nan' and len(name) > 2:
+            if w and h:
+                for idx, text in enumerate(slide_texts_lower):
+                    if idx not in seen_slides and name in text and w in text and h in text:
+                        best_match_idx = idx
+                        break
+
+        if best_match_idx is None and name and name != 'nan' and len(name) > 2:
+            for idx, text in enumerate(slide_texts_lower):
+                if idx not in seen_slides and name in text:
                     best_match_idx = idx
-            elif name and name != 'nan' and len(name) > 2 and name in text:
-                best_match_idx = idx
-                break
+                    break
 
         if best_match_idx is not None:
             matched_indices.append(best_match_idx)
             seen_slides.add(best_match_idx)
             matched_excel_rows.add(row_idx)
+
+            if size_str:
+                update_slide_size(slides[best_match_idx], size_str)
 
         curr_p = 45 + int((i + 1) / total_items * 30)
         progress_bar.progress(min(curr_p, 75))
@@ -235,9 +314,7 @@ def process_files_with_progress(pptx_bytes, excel_bytes, progress_bar, status_te
     status_text.markdown("⏳ **Generating Final Excel Report...**")
     progress_bar.progress(90)
     
-    wb = openpyxl.load_workbook(excel_bytes)
     ws = wb.active
-
     headers = [cell.value for cell in ws[1]]
     remark_col_num = len(headers) + 1
     ws.cell(row=1, column=remark_col_num, value="Remark")
@@ -262,7 +339,6 @@ def process_files_with_progress(pptx_bytes, excel_bytes, progress_bar, status_te
 
         new_row_idx = ws.max_row + 1
 
-        # Direct Column Mapping for Extra Rows
         if col_name:
             c_idx = df.columns.get_loc(col_name) + 1
             ws.cell(row=new_row_idx, column=c_idx, value=ext_name)
@@ -310,7 +386,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 uploaded_pptx = st.file_uploader("1. Upload PowerPoint Presentation (.pptx)", type=["pptx"])
-uploaded_excel = st.file_uploader("2. Upload Master Excel File (.xlsx)", type=["xlsx", "xls"])
+uploaded_excel = st.file_uploader("2. Upload Master Excel File (.xlsx, .xls, .csv, .xlsm)", type=["xlsx", "xls", "csv", "xlsm"])
 
 st.markdown("<br>", unsafe_allow_html=True)
 
