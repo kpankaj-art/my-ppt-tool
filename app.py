@@ -164,8 +164,8 @@ def process_files_with_progress(pptx_file, excel_file, progress_bar, status_text
     col_sap = next((c for c in df.columns if any(k in str(c).lower() for k in ['sap', 'code', 'dealer_code', 'id'])), None)
     col_name = next((c for c in df.columns if any(k in str(c).lower() for k in ['outlet', 'party', 'customer', 'dealer', 'shop', 'store', 'name'])), None)
     col_city = next((c for c in df.columns if any(k in str(c).lower() for k in ['city', 'location', 'address', 'town', 'place'])), None)
-    col_width = next((c for c in df.columns if 'width' in str(c).lower() or 'w' == str(c).strip().lower()), None)
-    col_height = next((c for c in df.columns if 'height' in str(c).lower() or 'h' == str(c).strip().lower()), None)
+    col_width = next((c for c in df.columns if 'width' in str(c).lower() or str(c).strip().lower() in ['w', 'w(ft)', 'width(ft)']), None)
+    col_height = next((c for c in df.columns if 'height' in str(c).lower() or str(c).strip().lower() in ['h', 'h(ft)', 'height(ft)']), None)
 
     excel_criteria = []
     for idx, row in df.iterrows():
@@ -194,7 +194,7 @@ def process_files_with_progress(pptx_file, excel_file, progress_bar, status_text
         
     slide_texts_lower = [t.lower() for t in raw_slide_texts]
 
-    status_text.markdown("⏳ **Smart Matching Slides...**")
+    status_text.markdown("⏳ **Smart Matching Slides (Size Aware)...**")
     matched_indices = []
     seen_slides = set()
     matched_excel_rows = set()
@@ -208,18 +208,34 @@ def process_files_with_progress(pptx_file, excel_file, progress_bar, status_text
 
         best_match_idx = None
 
-        if mob and mob != 'nan':
+        # 1. Primary Priority: Match (SAP or Mobile or Name) ALONG WITH Size (Width & Height)
+        if w and h:
+            for idx, text in enumerate(slide_texts_lower):
+                if idx in seen_slides:
+                    continue
+                size_condition = (w in text and h in text) or (f"{w}x{h}" in text.replace(" ", ""))
+                if size_condition:
+                    if (mob and mob != 'nan' and mob in text) or \
+                       (sap and sap != 'nan' and sap in text) or \
+                       (name and name != 'nan' and len(name) > 2 and name in text):
+                        best_match_idx = idx
+                        break
+
+        # 2. Secondary Priority: Match Mobile + City/Name (if size not found or uniquely matched)
+        if best_match_idx is None and mob and mob != 'nan':
             for idx, text in enumerate(slide_texts_lower):
                 if idx not in seen_slides and mob in text:
                     best_match_idx = idx
                     break
 
+        # 3. Third Priority: Match SAP Code
         if best_match_idx is None and sap and sap != 'nan':
             for idx, text in enumerate(slide_texts_lower):
                 if idx not in seen_slides and sap in text:
                     best_match_idx = idx
                     break
 
+        # 4. Fourth Priority: Name + City
         if best_match_idx is None and name and name != 'nan' and len(name) > 2:
             if city and city != 'nan':
                 for idx, text in enumerate(slide_texts_lower):
@@ -227,13 +243,7 @@ def process_files_with_progress(pptx_file, excel_file, progress_bar, status_text
                         best_match_idx = idx
                         break
 
-        if best_match_idx is None and name and name != 'nan' and len(name) > 2:
-            if w and h:
-                for idx, text in enumerate(slide_texts_lower):
-                    if idx not in seen_slides and name in text and w in text and h in text:
-                        best_match_idx = idx
-                        break
-
+        # 5. Fallback Priority: Name match only
         if best_match_idx is None and name and name != 'nan' and len(name) > 2:
             for idx, text in enumerate(slide_texts_lower):
                 if idx not in seen_slides and name in text:
