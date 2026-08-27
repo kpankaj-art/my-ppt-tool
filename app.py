@@ -79,11 +79,14 @@ st.markdown("""
 
 # --- HELPER FUNCTIONS ---
 
-def clean_dim(val):
-    """Clean dimension values like '10.0' -> '10'"""
+def normalize_str(val):
+    """Remove spaces, hyphens, and extra symbols for accurate matching"""
     if pd.isna(val) or str(val).strip().lower() in ['nan', 'none', '']:
         return ""
-    val_str = str(val).strip()
+    val_str = str(val).strip().lower()
+    # Remove all whitespace characters
+    val_str = re.sub(r'\s+', '', val_str)
+    # Remove decimal trailing .0 if present
     if val_str.endswith('.0'):
         val_str = val_str[:-2]
     return val_str
@@ -178,20 +181,21 @@ def process_files_with_progress(pptx_file, excel_file, progress_bar, status_text
 
     excel_criteria = []
     for idx, row in df.iterrows():
-        mob = str(row[col_mobile]).split('.')[0].strip() if col_mobile and pd.notna(row[col_mobile]) else ""
-        sap = str(row[col_sap]).split('.')[0].strip() if col_sap and pd.notna(row[col_sap]) else ""
-        name = str(row[col_name]).strip() if col_name and pd.notna(row[col_name]) else ""
-        city = str(row[col_city]).strip() if col_city and pd.notna(row[col_city]) else ""
-        w = clean_dim(row[col_width]) if col_width else ""
-        h = clean_dim(row[col_height]) if col_height else ""
-
-        if mob.lower() in ['nan', 'none']: mob = ""
-        if sap.lower() in ['nan', 'none']: sap = ""
-        if name.lower() in ['nan', 'none']: name = ""
-        if city.lower() in ['nan', 'none']: city = ""
+        raw_mob = str(row[col_mobile]) if col_mobile and pd.notna(row[col_mobile]) else ""
+        raw_sap = str(row[col_sap]) if col_sap and pd.notna(row[col_sap]) else ""
+        raw_name = str(row[col_name]) if col_name and pd.notna(row[col_name]) else ""
+        raw_city = str(row[col_city]) if col_city and pd.notna(row[col_city]) else ""
+        raw_w = row[col_width] if col_width else ""
+        raw_h = row[col_height] if col_height else ""
 
         excel_criteria.append({
-            'row_idx': idx, 'mobile': mob, 'sap': sap, 'name': name, 'city': city, 'width': w, 'height': h
+            'row_idx': idx, 
+            'mobile': normalize_str(raw_mob), 
+            'sap': normalize_str(raw_sap), 
+            'name': normalize_str(raw_name), 
+            'city': normalize_str(raw_city), 
+            'width': normalize_str(raw_w), 
+            'height': normalize_str(raw_h)
         })
 
     status_text.markdown("⏳ **Analyzing Presentation Slides...**")
@@ -206,9 +210,10 @@ def process_files_with_progress(pptx_file, excel_file, progress_bar, status_text
         curr_p = 25 + int((idx + 1) / total_slides * 20)
         progress_bar.progress(min(curr_p, 45))
         
-    slide_texts_lower = [t.lower() for t in raw_slide_texts]
+    # Standard Normalized Slide Texts (Spaces Removed for Space-Independent Matching)
+    slide_texts_norm = [normalize_str(t) for t in raw_slide_texts]
 
-    status_text.markdown("⏳ **Smart Matching Slides (Name & Size Fallback)...**")
+    status_text.markdown("⏳ **Smart Matching Slides (Space Insensitive)...**")
     matched_indices = []
     seen_slides = set()
     matched_excel_rows = set()
@@ -216,55 +221,55 @@ def process_files_with_progress(pptx_file, excel_file, progress_bar, status_text
     total_items = len(excel_criteria)
     for i, item in enumerate(excel_criteria):
         row_idx = item['row_idx']
-        mob, sap = item['mobile'].lower(), item['sap'].lower()
-        name, city = item['name'].lower(), item['city'].lower()
-        w, h = item['width'].lower(), item['height'].lower()
+        mob, sap = item['mobile'], item['sap']
+        name, city = item['name'], item['city']
+        w, h = item['width'], item['height']
 
         best_match_idx = None
 
-        # 1. Primary: Match Unique Identifier (Mobile / SAP) + Size
+        # 1. Primary: Match Unique Identifier (Mobile / SAP) + Size (Width & Height)
         if w and h:
-            for idx, text in enumerate(slide_texts_lower):
+            for idx, norm_text in enumerate(slide_texts_norm):
                 if idx in seen_slides: continue
-                size_match = (w in text and h in text) or (f"{w}x{h}" in text.replace(" ", ""))
+                size_match = (w in norm_text and h in norm_text) or (f"{w}x{h}" in norm_text)
                 if size_match:
-                    if (mob and mob in text) or (sap and sap in text):
+                    if (mob and mob in norm_text) or (sap and sap in norm_text):
                         best_match_idx = idx
                         break
 
         # 2. Match Unique Identifier (Mobile / SAP) Without Size
         if best_match_idx is None:
             if mob:
-                for idx, text in enumerate(slide_texts_lower):
-                    if idx not in seen_slides and mob in text:
+                for idx, norm_text in enumerate(slide_texts_norm):
+                    if idx not in seen_slides and mob in norm_text:
                         best_match_idx = idx
                         break
             elif sap:
-                for idx, text in enumerate(slide_texts_lower):
-                    if idx not in seen_slides and sap in text:
+                for idx, norm_text in enumerate(slide_texts_norm):
+                    if idx not in seen_slides and sap in norm_text:
                         best_match_idx = idx
                         break
 
-        # 3. CRITICAL FALLBACK (When Mobile & SAP are BOTH BLANK): Name + Size Match
+        # 3. CRITICAL FALLBACK: Name + Size Match (When Mobile & SAP are Blank)
         if best_match_idx is None and name and len(name) > 2 and w and h:
-            for idx, text in enumerate(slide_texts_lower):
+            for idx, norm_text in enumerate(slide_texts_norm):
                 if idx in seen_slides: continue
-                size_match = (w in text and h in text) or (f"{w}x{h}" in text.replace(" ", ""))
-                if name in text and size_match:
+                size_match = (w in norm_text and h in norm_text) or (f"{w}x{h}" in norm_text)
+                if name in norm_text and size_match:
                     best_match_idx = idx
                     break
 
-        # 4. Fallback: Name + City (When Mobile & SAP are BLANK)
+        # 4. Fallback: Name + City
         if best_match_idx is None and name and len(name) > 2 and city:
-            for idx, text in enumerate(slide_texts_lower):
-                if idx not in seen_slides and name in text and city in text:
+            for idx, norm_text in enumerate(slide_texts_norm):
+                if idx not in seen_slides and name in norm_text and city in norm_text:
                     best_match_idx = idx
                     break
 
         # 5. Last Resort: Name Match Only
         if best_match_idx is None and name and len(name) > 2:
-            for idx, text in enumerate(slide_texts_lower):
-                if idx not in seen_slides and name in text:
+            for idx, norm_text in enumerate(slide_texts_norm):
+                if idx not in seen_slides and name in norm_text:
                     best_match_idx = idx
                     break
 
