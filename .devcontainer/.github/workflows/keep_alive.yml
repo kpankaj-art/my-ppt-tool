@@ -1,0 +1,20 @@
+name: Streamlit Keep Alive
+
+on:
+  schedule:
+    # Runs every 10 hours (UTC)
+    - cron: "17 */10 * * *"
+  workflow_dispatch:
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Ping Streamlit app
+        env:
+          APP_URL: "https://operation-team-work-tools-earht85tgz7esjvg3gaemz.streamlit.app/#brand-to-ppt-generator"
+        run: |
+          echo "Pinging: $APP_URL"
+          curl --fail --silent --show-error             --max-time 60             --retry 3             --retry-delay 5             "$APP_URL" > /dev/null
+          echo "Streamlit app ping completed."
