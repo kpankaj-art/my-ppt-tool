@@ -82,6 +82,10 @@ def safe_excel_text(value):
     return re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", "", str(value))
 
 
+def safe_excel_value(value):
+    """Compatibility wrapper: return a value safe for Excel/openpyxl."""
+    return safe_excel_text(value)
+
 def sanitize_dataframe_for_excel(df):
     df = df.copy()
     # Clean illegal characters from headers and make blank/duplicate headers safe.
