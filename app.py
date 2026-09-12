@@ -316,32 +316,66 @@ def detect_excel_columns(df):
         "media_type": media_type
     }
 
-def load_excel(uploaded_file):
+def load_excel(uploaded_file, selected_sheet=None):
+    """
+    IMPORTANT:
+    For XLSX/XLSM, NEVER rebuild the user's workbook.
+    Open the uploaded workbook itself, select the requested sheet, and append
+    only the matching/report information to that same sheet.
+
+    All other sheets remain in the workbook.
+    Existing values/formulas/formatting are preserved as far as openpyxl can.
+    """
     filename = uploaded_file.name.lower()
     data = uploaded_file.getvalue()
 
     if filename.endswith(".csv"):
         df = pd.read_csv(io.BytesIO(data), dtype=str).fillna("")
-    elif filename.endswith(".xls"):
-        df = pd.read_excel(io.BytesIO(data), dtype=str, engine="xlrd").fillna("")
-    else:
-        df = pd.read_excel(io.BytesIO(data), dtype=str, engine="openpyxl").fillna("")
+        df = sanitize_dataframe_for_excel(df)
+        return df, dataframe_to_workbook(df), False, "Sheet1"
 
-    return sanitize_dataframe_for_excel(df)
+    if filename.endswith(".xls"):
+        # Old .xls cannot be edited safely with openpyxl.
+        # Read it and create a compatible workbook as a fallback.
+        df = pd.read_excel(
+            io.BytesIO(data), dtype=str, engine="xlrd"
+        ).fillna("")
+        df = sanitize_dataframe_for_excel(df)
+        return df, dataframe_to_workbook(df), False, "Sheet1"
 
+    # XLSX / XLSM: preserve the ORIGINAL workbook.
+    keep_vba = filename.endswith(".xlsm")
+    wb = openpyxl.load_workbook(
+        io.BytesIO(data),
+        keep_vba=keep_vba,
+        data_only=False
+    )
 
+    if selected_sheet not in wb.sheetnames:
+        selected_sheet = wb.sheetnames[0]
 
-def safe_excel_value(value):
-    """Remove characters forbidden by openpyxl/Excel XML."""
-    if value is None:
-        return ""
-    try:
-        if pd.isna(value):
-            return ""
-    except Exception:
-        pass
-    s = str(value)
-    return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", s)
+    ws = wb[selected_sheet]
+
+    # Read exactly the selected worksheet for matching.
+    df = pd.read_excel(
+        io.BytesIO(data),
+        sheet_name=selected_sheet,
+        dtype=str,
+        engine="openpyxl"
+    ).fillna("")
+    df = sanitize_dataframe_for_excel(df)
+
+    # Clean only illegal control characters in the TARGET sheet.
+    # We do not rebuild the workbook and we do not touch other sheets.
+    for row in ws.iter_rows():
+        for cell in row:
+            if isinstance(cell.value, str):
+                cleaned = safe_excel_text(cell.value)
+                if cleaned != cell.value:
+                    cell.value = cleaned
+
+    return df, wb, True, selected_sheet
+
 
 def dataframe_to_workbook(df):
     wb = openpyxl.Workbook()
@@ -1025,24 +1059,59 @@ def autosize_worksheet(ws):
 
 
 def append_report_columns(ws):
-    headers = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
+    """
+    Append report columns after the user's existing columns.
+    Existing columns and data are not replaced.
+    """
+    from copy import copy
 
-    # Remove duplicate report columns if re-run logic is ever reused
-    existing = {str(x).strip() for x in headers if x is not None}
+    headers = [
+        safe_excel_text(ws.cell(1, c).value).strip()
+        for c in range(1, ws.max_column + 1)
+    ]
 
-    for col in REPORT_COLUMNS:
-        if col not in existing:
-            ws.cell(1, ws.max_column + 1, col)
+    existing = {h for h in headers if h}
+    next_col = ws.max_column + 1
 
-    headers = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
-    col_map = {str(v): i for i, v in enumerate(headers, 1)}
+    for report_col in REPORT_COLUMNS:
+        if report_col in existing:
+            continue
 
-    for c in range(1, ws.max_column + 1):
-        ws.cell(1, c).fill = HEADER_FILL
-        ws.cell(1, c).font = WHITE_BOLD
-        ws.cell(1, c).alignment = Alignment(horizontal="center")
+        cell = ws.cell(1, next_col, report_col)
 
-    return col_map
+        # Copy basic header formatting from the previous column first.
+        if next_col > 1:
+            prev = ws.cell(1, next_col - 1)
+            if prev.has_style:
+                cell._style = copy(prev._style)
+                cell.font = copy(prev.font)
+                cell.fill = copy(prev.fill)
+                cell.border = copy(prev.border)
+                cell.alignment = copy(prev.alignment)
+                cell.number_format = prev.number_format
+
+        # Standard report-header appearance.
+        cell.fill = HEADER_FILL
+        cell.font = WHITE_BOLD
+        cell.alignment = Alignment(
+            horizontal="center",
+            vertical="center",
+            wrap_text=True
+        )
+
+        existing.add(report_col)
+        next_col += 1
+
+    headers = [
+        safe_excel_text(ws.cell(1, c).value).strip()
+        for c in range(1, ws.max_column + 1)
+    ]
+
+    return {
+        value: idx
+        for idx, value in enumerate(headers, 1)
+        if value
+    }
 
 
 def fill_entire_row(ws, row_num, fill, font):
@@ -1106,11 +1175,11 @@ def set_progress(progress, value):
             pass
 
 
-def process_files(pptx_file, excel_file, progress, status):
+def process_files(pptx_file, excel_file, progress, status, selected_sheet=None):
     status.write("⏳ Excel read ho rahi hai...")
     set_progress(progress, 8)
 
-    df = load_excel(excel_file)
+    df, wb, preserved_upload, actual_sheet = load_excel(excel_file, selected_sheet)
     mapping = detect_excel_columns(df)
 
     status.write("🔎 Excel columns identify ho rahe hain...")
@@ -1148,9 +1217,10 @@ def process_files(pptx_file, excel_file, progress, status):
     set_progress(progress, 70)
     status.write("📝 Excel report generate ho rahi hai...")
 
-    # Make a fresh workbook from original dataframe.
-    wb = dataframe_to_workbook(df)
-    ws = wb.active
+    # IMPORTANT: modify the workbook the user uploaded.
+    # For XLSX/XLSM this keeps the original sheet and appends the report
+    # columns instead of creating a separate rebuilt Excel.
+    ws = wb[actual_sheet]
 
     col_map = append_report_columns(ws)
 
@@ -1406,6 +1476,23 @@ st.caption(
     "Supported matching: Name, Mobile, SAP, Address, City/District, "
     "Size, Width, Height, Quantity and Media Type."
 )
+
+# Choose which existing worksheet should receive the remarks/report columns.
+selected_sheet = None
+if uploaded_excel and uploaded_excel.name.lower().endswith((".xlsx", ".xlsm")):
+    try:
+        _wb_preview = openpyxl.load_workbook(
+            io.BytesIO(uploaded_excel.getvalue()),
+            read_only=True,
+            keep_vba=uploaded_excel.name.lower().endswith(".xlsm")
+        )
+        selected_sheet = st.selectbox(
+            "📄 Select the Excel sheet to update",
+            _wb_preview.sheetnames,
+            help="Only this existing sheet will receive the extra columns/rows. Other sheets stay in the workbook."
+        )
+    except Exception as _sheet_err:
+        st.warning(f"Excel sheets read nahi ho paaye: {_sheet_err}")
 
 if st.button(
     "🚀 Process & Sync Files",
