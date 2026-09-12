@@ -196,21 +196,34 @@ def normalize_size_pair(w, h):
 # EXCEL COLUMN DETECTION
 # ============================================================
 
+
 def find_column(columns, keywords, exclude=None):
+    """Safe column detection. Uses word/token matching so 'id' cannot match 'width'."""
     exclude = exclude or []
     scored = []
+
+    def tokens(s):
+        return set(re.findall(r"[a-z0-9]+", clean_text(s)))
 
     for col in columns:
         c = clean_text(col)
         if any(x in c for x in exclude):
             continue
 
+        ct = tokens(c)
         score = 0
+
         for kw in keywords:
-            if c == kw:
-                score += 100
-            elif kw in c:
-                score += 30
+            kt = tokens(kw)
+            if c == clean_text(kw):
+                score += 200
+            elif kt and kt.issubset(ct):
+                score += 80
+            elif clean_text(kw) in ct:
+                score += 60
+            elif len(clean_text(kw).replace(" ", "")) >= 4 and clean_text(kw).replace(" ", "") in re.sub(r"[^a-z0-9]", "", c):
+                # Allow MobileNumber, ContactNumber, SAPCode, etc.
+                score += 45
 
         if score:
             scored.append((score, col))
@@ -221,60 +234,87 @@ def find_column(columns, keywords, exclude=None):
     scored.sort(reverse=True, key=lambda x: x[0])
     return scored[0][1]
 
-
 def detect_excel_columns(df):
+    """Detect the business fields without confusing helper columns such as Area with City."""
     cols = list(df.columns)
 
+    def pick_exact(names):
+        for wanted in names:
+            for c in cols:
+                if clean_text(c) == clean_text(wanted):
+                    return c
+        return None
+
+    name = pick_exact([
+        "Outlet Name", "Retailer Name", "Dealer Name", "Customer Name",
+        "Name of firm", "DEALER NAME", "DEALER  NAME"
+    ]) or find_column(
+        cols,
+        ["outlet name", "retailer name", "dealer name", "customer name",
+         "name of firm", "dealer name", "outlet"]
+    )
+
+    mobile = pick_exact([
+        "MobileNumber", "Mobile", "Contact No. of Party", "Contact Number",
+        "DEALER MOBILE NO", "Dealer Mobile No"
+    ]) or find_column(
+        cols,
+        ["mobile number", "mobile", "contact number", "contact no of party",
+         "dealer mobile no", "phone number"]
+    )
+
+    sap = pick_exact([
+        "SAP Code", "SAP", "Dealer Code", "Retailer Code",
+        "PARTY CODE", "Party Code"
+    ]) or find_column(
+        cols,
+        ["sap code", "dealer code", "retailer code", "party code"]
+    )
+
+    address = pick_exact([
+        "Address", "ADDRESS", "DEALER ADDRESS", "Dealer Address"
+    ]) or find_column(cols, ["address", "dealer address"])
+
+    city = pick_exact([
+        "City", "CITY", "City / Town", "District"
+    ])
+    if not city:
+        city = find_column(cols, ["city", "district", "city town", "town"])
+
+    # Never treat Area(Sq.FT.) / Total / allocation columns as city.
+    if city and re.search(r"area|sq\.?\s*ft|allocation|total", clean_text(city)):
+        city = None
+
+    width = pick_exact([
+        "Width (inches)", "W", "Widht", "Width", "WIDTH"
+    ]) or find_column(cols, ["width", "widht"])
+
+    height = pick_exact([
+        "Height (inches)", "H", "Hight", "Height", "HEIGHT"
+    ]) or find_column(cols, ["height", "hight"])
+
+    size = pick_exact(["Size", "Dimension", "Dimensions"])
+
+    quantity = pick_exact([
+        "Qty", "Qyt", "QTY", "Quantity", "board_qty"
+    ]) or find_column(cols, ["qty", "quantity", "qyt"])
+
+    media_type = pick_exact([
+        "Media Type", "TYPE", "Type", "type"
+    ]) or find_column(cols, ["media type", "type"])
+
     return {
-        "name": find_column(
-            cols,
-            ["outlet name", "dealer name", "party name", "customer name",
-             "shop name", "store name", "outlet", "dealer", "party",
-             "customer", "shop", "store", "name"]
-        ),
-        "mobile": find_column(
-            cols,
-            ["mobile no", "mobile number", "contact no", "contact number",
-             "phone no", "phone number", "mobile", "contact", "phone", "mob"]
-        ),
-        "sap": find_column(
-            cols,
-            ["sap code", "dealer code", "dealer id", "sap", "code", "dealer_id", "id"]
-        ),
-        "address": find_column(
-            cols,
-            ["full address", "address", "addr"]
-        ),
-        "city": find_column(
-            cols,
-            ["district", "city", "location", "town", "place", "area"]
-        ),
-        "width": find_column(
-            cols,
-            ["width", "width ft", "width(ft)", "w(ft)", "w"]
-        ),
-        "height": find_column(
-            cols,
-            ["height", "height ft", "height(ft)", "h(ft)", "h"]
-        ),
-        "size": find_column(
-            cols,
-            ["size", "dimension", "dimensions", "size ft"]
-        ),
-        "quantity": find_column(
-            cols,
-            ["quantity", "qty", "qnty", "units", "no of", "number of"]
-        ),
-        "media_type": find_column(
-            cols,
-            ["media type", "media", "type", "display type", "sign type"]
-        )
+        "name": name,
+        "mobile": mobile,
+        "sap": sap,
+        "address": address,
+        "city": city,
+        "width": width,
+        "height": height,
+        "size": size,
+        "quantity": quantity,
+        "media_type": media_type
     }
-
-
-# ============================================================
-# FILE READERS
-# ============================================================
 
 def load_excel(uploaded_file):
     filename = uploaded_file.name.lower()
@@ -290,27 +330,35 @@ def load_excel(uploaded_file):
     return sanitize_dataframe_for_excel(df)
 
 
+
+def safe_excel_value(value):
+    """Remove characters forbidden by openpyxl/Excel XML."""
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    s = str(value)
+    return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", s)
+
 def dataframe_to_workbook(df):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Sync Report"
 
     for col_idx, col in enumerate(df.columns, 1):
-        cell = ws.cell(1, col_idx, str(col))
+        cell = ws.cell(1, col_idx, safe_excel_value(col))
         cell.fill = HEADER_FILL
         cell.font = WHITE_BOLD
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
     for row_idx, row in enumerate(df.itertuples(index=False), 2):
         for col_idx, value in enumerate(row, 1):
-            ws.cell(row_idx, col_idx, safe_excel_text(value))
+            ws.cell(row_idx, col_idx, safe_excel_value(value))
 
     return wb
-
-
-# ============================================================
-# PPT EXTRACTION
-# ============================================================
 
 def extract_text_from_shape(shape, output):
     try:
@@ -375,115 +423,250 @@ def value_after_label(text, labels):
     return ""
 
 
-def extract_slide_details(text):
+
+def extract_phones(text):
+    """Return all valid Indian 10-digit mobile numbers found in text."""
+    text = clean_text(text)
+    found = re.findall(r"(?<!\d)(?:\+?91[\s\-]?)?[6-9]\d{9}(?!\d)", text)
+    result = []
+    for x in found:
+        d = re.sub(r"\D", "", x)
+        if len(d) == 12 and d.startswith("91"):
+            d = d[2:]
+        if len(d) == 10 and d not in result:
+            result.append(d)
+    return result
+
+
+def normalize_phones(value):
+    return extract_phones(str(value)) if value else []
+
+
+def extract_size_candidates(text):
+    """
+    Extract dimension pairs from a slide. Supports:
+    12x3, 12 X 3, 12 × 3 and layouts where x is a separate text box.
+    """
+    t = str(text).replace("×", "x").replace("*", "x")
+    pairs = []
+
+    # Normal inline dimensions
+    for m in re.finditer(
+        r"(?<!\d)(\d+(?:\.\d+)?)\s*(?:ft|feet)?\s*x\s*"
+        r"(\d+(?:\.\d+)?)(?:\s*(?:ft|feet))?(?!\d)",
+        t, re.I
+    ):
+        pairs.append((normalize_dimension(m.group(1)), normalize_dimension(m.group(2))))
+
+    # Newline / separate-box layout: number, number, x
+    nums = re.findall(r"(?<!\d)(\d+(?:\.\d+)?)(?!\d)", t)
+    # Don't blindly pair all numbers because mobile/SAP can appear.
+    # Pairs are handled separately by the spatial parser below.
+    return [(a,b) for a,b in pairs if a and b]
+
+
+def extract_slide_details(text, slide=None):
+    """Extract recce fields from both normal and the special Walkaroo template."""
     details = {
-        "name": "",
-        "mobile": "",
-        "sap": "",
-        "address": "",
-        "city": "",
-        "width": "",
-        "height": "",
-        "size": "",
-        "quantity": "",
-        "media_type": ""
+        "name": "", "mobile": "", "sap": "", "address": "", "city": "",
+        "width": "", "height": "", "size": "", "quantity": "", "media_type": ""
     }
 
-    details["name"] = value_after_label(text, [
-        "Outlet Name", "Dealer Name", "Party Name", "Customer Name",
-        "Shop Name", "Store Name", "Outlet", "Dealer", "Party",
-        "Customer", "Shop", "Store", "Name"
-    ])
+    raw = str(text or "").replace("\x0b", "\n").replace("\x0c", "\n")
+    raw = re.sub(r"[\x00-\x08\x0e-\x1f]", "", raw)
 
-    details["mobile"] = normalize_phone(
-        value_after_label(text, [
-            "Mobile No", "Mobile Number", "Mobile", "Contact No",
-            "Contact Number", "Contact", "Phone No", "Phone Number", "Phone"
-        ])
-    )
+    # Determine special Walkaroo layout from its labels.
+    is_walkaroo = bool(re.search(r"\b(?:dealer[_ ]code|board[_ ]qty)\b", raw, re.I))
 
-    details["sap"] = normalize_code(
-        value_after_label(text, [
-            "SAP Code", "SAP", "Dealer Code", "Dealer ID", "Dealer Id", "Code"
-        ])
-    )
+    if slide is not None and is_walkaroo:
+        shapes = []
+        for sh in slide.shapes:
+            if getattr(sh, "has_text_frame", False) and sh.text.strip():
+                shapes.append({
+                    "text": sh.text.strip(),
+                    "x": sh.left,
+                    "y": sh.top
+                })
 
-    details["address"] = value_after_label(text, [
-        "Full Address", "Address", "Addr"
-    ])
-
-    details["city"] = value_after_label(text, [
-        "District", "City", "Location", "Town", "Place", "Area"
-    ])
-
-    details["quantity"] = normalize_number(
-        value_after_label(text, [
-            "Quantity", "Qty", "Qnty", "Units", "No of", "Number of"
-        ])
-    )
-
-    details["media_type"] = value_after_label(text, [
-        "Media Type", "Media", "Display Type", "Sign Type", "Type"
-    ])
-
-    # Size: first look for W x H
-    dim = re.search(
-        r"(\d+(?:\.\d+)?)\s*(?:ft|feet)?\s*[x×*]\s*"
-        r"(\d+(?:\.\d+)?)\s*(?:ft|feet)?",
-        text,
-        re.IGNORECASE
-    )
-
-    if dim:
-        details["width"] = normalize_dimension(dim.group(1))
-        details["height"] = normalize_dimension(dim.group(2))
-        details["size"] = normalize_size_pair(
-            details["width"], details["height"]
-        )
-    else:
-        details["width"] = normalize_dimension(
-            value_after_label(text, ["Width", "W", "Width(ft)", "W(ft)"])
-        )
-        details["height"] = normalize_dimension(
-            value_after_label(text, ["Height", "H", "Height(ft)", "H(ft)"])
-        )
-        details["size"] = normalize_size_pair(
-            details["width"], details["height"]
-        )
-
-    # Fallback: find a likely 10 digit Indian mobile anywhere
-    if not details["mobile"]:
-        m = re.search(r"(?<!\d)(?:\+?91[\s\-]?)?[6-9]\d{9}(?!\d)", text)
-        if m:
-            details["mobile"] = normalize_phone(m.group())
-
-    # Fallback: name from first useful line
-    if not details["name"]:
-        bad = [
-            "qty", "quantity", "size", "type", "mobile", "contact", "phone",
-            "address", "city", "district", "width", "height", "sap", "code",
-            "date", "media"
+        # Top-area value boxes.
+        top = [
+            s for s in shapes
+            if s["y"] < 3_000_000
+            and not re.match(
+                r"^(?:outlet name|address|city|contact no|mobile|installation date|dealer_code)\b",
+                s["text"].strip(), re.I
+            )
+            and s["text"].strip().lower() not in {"far view", "close view"}
         ]
-        for line in clean_lines(text):
-            if len(line) >= 3 and not any(x in line.lower() for x in bad):
-                if not re.fullmatch(r"[\d\s:/.,xX\-]+", line):
-                    details["name"] = line[:100]
+
+        # Name/address are the two non-phone, non-numeric value boxes.
+        value_boxes = [
+            s for s in top
+            if not extract_phones(s["text"])
+            and not re.fullmatch(r"[\d\s.,:/\-]+", s["text"].strip())
+            and len(s["text"].strip()) >= 3
+        ]
+        value_boxes.sort(key=lambda s: (s["y"], s["x"]))
+
+        if value_boxes:
+            details["name"] = value_boxes[0]["text"].strip()
+        if len(value_boxes) > 1:
+            details["address"] = value_boxes[1]["text"].strip()
+
+        phones = []
+        for s in shapes:
+            phones.extend(extract_phones(s["text"]))
+        if phones:
+            details["mobile"] = phones[0]
+
+        # Type is the short alphabetic value in the Type area.
+        for s in shapes:
+            t = s["text"].strip()
+            if 9_000_000 <= s["y"] <= 12_000_000 and s["x"] < 5_500_000:
+                if re.fullmatch(r"[A-Za-z]{2,6}", t) and t.lower() not in {
+                    "qty", "size", "type", "remarks", "board_qty"
+                }:
+                    details["media_type"] = t
                     break
 
-    # Generic SAP fallback: 6-12 digit standalone code, excluding mobile
-    if not details["sap"]:
-        for candidate in re.findall(r"(?<!\d)\d{6,12}(?!\d)", text):
-            c = normalize_code(candidate)
-            if c and c != details["mobile"]:
-                details["sap"] = c
+        # Width/height are the two numeric boxes around the Size label.
+        nums = []
+        for s in shapes:
+            t = s["text"].strip()
+            if 9_000_000 <= s["y"] <= 12_000_000:
+                if re.fullmatch(r"\d+(?:\.\d+)?", t):
+                    if 6_000_000 <= s["x"] <= 9_800_000:
+                        nums.append((s["x"], normalize_dimension(t)))
+
+        nums.sort(key=lambda z: z[0])
+        if len(nums) >= 2:
+            details["width"] = nums[0][1]
+            details["height"] = nums[-1][1]
+            details["size"] = f"{details['width']}x{details['height']}"
+
+        # Keep Qty conservative; board_qty is NOT automatically Qty.
+        # If a numeric box is immediately in the Qty area, use it.
+        for s in shapes:
+            t = s["text"].strip()
+            if 9_000_000 <= s["y"] <= 12_000_000 and 10_000_000 <= s["x"] <= 16_000_000:
+                if re.fullmatch(r"\d+(?:\.\d+)?", t):
+                    # Walkaroo files have a stray extra number; only accept 1-99.
+                    n = normalize_number(t)
+                    if n and float(n) <= 99:
+                        details["quantity"] = n
+                        break
+
+        return details
+
+    # ---------------- Normal label/value templates ----------------
+    lines = [x.strip() for x in raw.splitlines() if x.strip()]
+
+    def labeled_value(pattern):
+        m = re.search(pattern, raw, re.I)
+        return m.group(1).strip() if m else ""
+
+    details["name"] = labeled_value(
+        r"Outlet[ \t]*Name[ \t]*:[ \t]*([^\n\r]+)"
+    )
+    details["address"] = labeled_value(
+        r"Address[ \t]*:[ \t]*([^\n\r]+)"
+    )
+
+    phones = extract_phones(raw)
+    if phones:
+        details["mobile"] = phones[0]
+
+    details["sap"] = normalize_code(labeled_value(
+        r"(?:SAP[ \t]*Code|Dealer[ \t]*Code|Retailer[ \t]*Code|SAP)[ \t]*:[ \t]*([A-Za-z0-9]+)"
+    ))
+
+    details["media_type"] = labeled_value(
+        r"(?:Media[ \t]*Type|Display[ \t]*Type|Sign[ \t]*Type)[ \t]*:[ \t]*([A-Za-z0-9]+)"
+    )
+
+    details["quantity"] = normalize_number(labeled_value(
+        r"(?:Qty|Quantity|Qnty|Board[ _\t]*Qty)[ \t]*:[ \t]*(\d+(?:\.\d+)?)"
+    ))
+
+    pairs = extract_size_candidates(raw)
+    if pairs:
+        details["width"], details["height"] = pairs[0]
+        details["size"] = f"{details['width']}x{details['height']}"
+
+    # Some templates have the label in one line and the value in the next.
+    if not details["name"]:
+        for i, line in enumerate(lines):
+            if re.fullmatch(r"Outlet[ \t]*Name[ \t]*:?", line, re.I):
+                for nxt in lines[i+1:]:
+                    if not re.match(
+                        r"^(Address|City|Mobile|Contact|Installation|Size|Media Type|Remarks|Qty|Type|SAP|Dealer Code)\b",
+                        nxt, re.I
+                    ) and not extract_phones(nxt):
+                        details["name"] = nxt
+                        break
+                    if details["name"]:
+                        break
+
+    if not details["address"]:
+        for i, line in enumerate(lines):
+            if re.fullmatch(r"Address[ \t]*:?", line, re.I):
+                for nxt in lines[i+1:]:
+                    if (
+                        nxt.strip() == details["name"].strip()
+                        or extract_phones(nxt)
+                        or re.fullmatch(r"[\d\s.,:/\-]+", nxt)
+                        or re.match(
+                            r"^(City|Mobile|Contact|Installation|Size|Media Type|Remarks|Qty|Type|SAP|Dealer Code)\b",
+                            nxt, re.I
+                        )
+                    ):
+                        continue
+                    details["address"] = nxt
+                    break
+
+    # Adani's third sample has an invalid "Mobile : brand"; use any valid
+    # 10-digit phone from the whole slide instead.
+    if not details["mobile"] and phones:
+        details["mobile"] = phones[0]
+
+    # Fallback name from obvious value lines.
+    if not details["name"]:
+        blocked = (
+            "outlet name", "address", "mobile", "contact", "installation",
+            "size", "media type", "remarks", "qty", "quantity", "type",
+            "sap code", "dealer code", "speaker notes", "s_no"
+        )
+        for line in lines:
+            low = line.lower().strip(" :.-")
+            if (
+                len(line) >= 3
+                and low not in blocked
+                and not extract_phones(line)
+                and not re.fullmatch(r"[\d\s.,:/\-]+", line)
+                and low not in {"far view", "close view", "ok"}
+            ):
+                details["name"] = line
+                break
+
+    if not details["address"]:
+        # Prefer the first long non-label line that is NOT the outlet name.
+        for line in lines:
+            low = line.lower().strip(" :.-")
+            if (
+                line.strip() != details["name"].strip()
+                and len(line) >= 5
+                and not extract_phones(line)
+                and not re.fullmatch(r"[\d\s.,:/\-]+", line)
+                and low not in {"far view", "close view", "ok", "remarks"}
+                and not re.match(
+                    r"^(Outlet Name|Address|Mobile|Contact|Installation|City|Size|Media Type|Remarks|Qty|Type|SAP|Dealer Code|Bangur|speaker notes|s_no)\b",
+                    line, re.I
+                )
+            ):
+                details["address"] = line
                 break
 
     return details
-
-
-# ============================================================
-# MATCH ENGINE
-# ============================================================
 
 def token_similarity(a, b):
     a = normalize_text(a)
@@ -501,45 +684,66 @@ def token_similarity(a, b):
     return difflib.SequenceMatcher(None, a, b).ratio()
 
 
+
 def field_match(a, b, field):
     if field == "mobile":
-        a = normalize_phone(a)
-        b = normalize_phone(b)
-        return 1.0 if a and b and a == b else 0.0
+        aa = normalize_phones(a)
+        bb = normalize_phones(b)
+        return 1.0 if set(aa).intersection(bb) else 0.0
 
     if field == "sap":
-        a = normalize_code(a)
-        b = normalize_code(b)
-        return 1.0 if a and b and a == b else 0.0
+        aa = normalize_code(a)
+        bb = normalize_code(b)
+        return 1.0 if aa and bb and aa == bb else 0.0
 
     if field in {"width", "height", "quantity"}:
-        a = normalize_number(a)
-        b = normalize_number(b)
-        return 1.0 if a and b and a == b else 0.0
+        aa = normalize_number(a)
+        bb = normalize_number(b)
+        return 1.0 if aa and bb and aa == bb else 0.0
 
     if field == "size":
-        return 1.0 if (
-            normalize_text(a) and
-            normalize_text(b) and
-            normalize_text(a) == normalize_text(b)
-        ) else token_similarity(a, b)
+        return size_similarity(a, b)
 
     return token_similarity(a, b)
 
 
-FIELD_WEIGHTS = {
-    "mobile": 40,
-    "sap": 35,
-    "name": 22,
-    "address": 12,
-    "city": 10,
-    "size": 15,
-    "width": 7,
-    "height": 7,
-    "quantity": 6,
-    "media_type": 5
-}
+def size_similarity(a, b):
+    def pair(v):
+        s = str(v).lower().replace("×", "x").replace("*", "x")
+        m = re.search(r"(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)", s)
+        if not m:
+            return None
+        return float(m.group(1)), float(m.group(2))
 
+    pa, pb = pair(a), pair(b)
+    if not pa or not pb:
+        return 0.0
+
+    # Allow W/H reversal.
+    candidates = [
+        abs(pa[0]-pb[0]) / max(pa[0], pb[0], 1),
+        abs(pa[1]-pb[1]) / max(pa[1], pb[1], 1)
+    ]
+    direct = sum(candidates) / 2
+
+    reverse = (
+        abs(pa[0]-pb[1]) / max(pa[0], pb[1], 1) +
+        abs(pa[1]-pb[0]) / max(pa[1], pb[0], 1)
+    ) / 2
+
+    error = min(direct, reverse)
+
+    if error == 0:
+        return 1.0
+    if error <= 0.08:
+        return 0.95
+    if error <= 0.15:
+        return 0.90
+    if error <= 0.25:
+        return 0.78
+    if error <= 0.40:
+        return 0.55
+    return 0.0
 
 def build_excel_record(row, mapping, row_idx):
     rec = {"row_idx": row_idx}
@@ -547,7 +751,8 @@ def build_excel_record(row, mapping, row_idx):
     for field, col in mapping.items():
         rec[field] = clean_text(row[col]) if col else ""
 
-    rec["mobile"] = normalize_phone(rec.get("mobile", ""))
+    # Keep ALL mobile numbers (some dealers have 2 contact numbers).
+    rec["mobile"] = ",".join(normalize_phones(rec.get("mobile", "")))
     rec["sap"] = normalize_code(rec.get("sap", ""))
     rec["name_norm"] = normalize_text(rec.get("name", ""))
     rec["city_norm"] = normalize_text(rec.get("city", ""))
@@ -563,84 +768,128 @@ def build_excel_record(row, mapping, row_idx):
     return rec
 
 
+
 def candidate_score(excel_rec, ppt_rec):
     """
-    Weighted score. Strong identifiers get priority.
-    Conflicts reduce the score to prevent dangerous false matches.
+    Match score designed for real recce files:
+    - Mobile/SAP are strong identifiers.
+    - Name/address identify the outlet.
+    - Size/media/qty distinguish multiple boards for the same outlet.
+    - Size tolerates small recce/OCR differences.
     """
     score = 0.0
     max_possible = 0.0
     reasons = []
     conflicts = []
 
-    # Strong identifiers
-    if excel_rec["mobile"] and ppt_rec["mobile"]:
-        max_possible += FIELD_WEIGHTS["mobile"]
-        if excel_rec["mobile"] == ppt_rec["mobile"]:
-            score += FIELD_WEIGHTS["mobile"]
+    # Mobile
+    em = normalize_phones(excel_rec.get("mobile", ""))
+    pm = normalize_phones(ppt_rec.get("mobile", ""))
+    if em and pm:
+        max_possible += 40
+        if set(em).intersection(pm):
+            score += 40
             reasons.append("Mobile")
         else:
             conflicts.append("Mobile conflict")
-            score -= 35
 
-    if excel_rec["sap"] and ppt_rec["sap"]:
-        max_possible += FIELD_WEIGHTS["sap"]
-        if excel_rec["sap"] == ppt_rec["sap"]:
-            score += FIELD_WEIGHTS["sap"]
+    # SAP
+    es = normalize_code(excel_rec.get("sap", ""))
+    ps = normalize_code(ppt_rec.get("sap", ""))
+    if es and ps:
+        max_possible += 35
+        if es == ps:
+            score += 35
             reasons.append("SAP")
         else:
             conflicts.append("SAP conflict")
-            score -= 30
 
-    # Other fields
-    for field in ["name", "address", "city", "size", "width", "height",
-                  "quantity", "media_type"]:
-        ev = excel_rec.get(field, "")
-        pv = ppt_rec.get(field, "")
+    # Name
+    en = excel_rec.get("name", "")
+    pn = ppt_rec.get("name", "")
+    if en and pn:
+        sim = token_similarity(en, pn)
+        max_possible += 25
+        if sim >= 0.90:
+            score += 25
+            reasons.append("Name")
+        elif sim >= 0.72:
+            score += 25 * sim
+            reasons.append("Name similar")
+        else:
+            conflicts.append("Name conflict")
 
-        if field == "size":
-            ev = excel_rec.get("size_norm", "")
-            pv = normalize_text(ppt_rec.get("size", ""))
+    # Address
+    ea = excel_rec.get("address", "")
+    pa = ppt_rec.get("address", "")
+    if ea and pa:
+        sim = token_similarity(ea, pa)
+        max_possible += 12
+        if sim >= 0.80:
+            score += 12 * sim
+            reasons.append("Address")
+        elif sim >= 0.55:
+            score += 5
+            reasons.append("Address partial")
 
-        if not ev or not pv:
-            continue
+    # City
+    ec = excel_rec.get("city", "")
+    pc = ppt_rec.get("city", "")
+    if ec and pc:
+        sim = token_similarity(ec, pc)
+        max_possible += 8
+        if sim >= 0.75:
+            score += 8 * sim
+            reasons.append("City/District")
 
-        weight = FIELD_WEIGHTS[field]
-        sim = field_match(ev, pv, field)
+    # Media type
+    et = normalize_text(excel_rec.get("media_type", ""))
+    pt = normalize_text(ppt_rec.get("media_type", ""))
+    if et and pt:
+        max_possible += 8
+        if et == pt:
+            score += 8
+            reasons.append("Media Type")
 
-        # Don't let tiny similarities count
-        if sim >= 0.88:
-            score += weight
-            max_possible += weight
-            reasons.append(field.replace("_", " ").title())
-        elif sim >= 0.65 and field in {"name", "address", "city"}:
-            score += weight * sim
-            max_possible += weight
-            reasons.append(f"{field.title()} similar")
+    # Size
+    esz = excel_rec.get("size_norm", "")
+    psz = ppt_rec.get("size", "")
+    if esz and psz:
+        sim = size_similarity(esz, psz)
+        max_possible += 18
+        if sim >= 0.90:
+            score += 18
+            reasons.append("Size")
+        elif sim >= 0.75:
+            score += 12
+            reasons.append("Size close")
 
-    # If no comparable data exists, candidate is unusable
+    # Quantity
+    eq = normalize_number(excel_rec.get("quantity", ""))
+    pq = normalize_number(ppt_rec.get("quantity", ""))
+    if eq and pq:
+        max_possible += 5
+        if eq == pq:
+            score += 5
+            reasons.append("Qty")
+
     if max_possible <= 0:
         return 0.0, reasons, conflicts
 
-    # Normalize against a useful baseline.
-    confidence = max(0.0, min(100.0, (score / max_possible) * 100))
+    confidence = max(0.0, min(100.0, score / max_possible * 100))
 
-    # Bonus when multiple independent identifiers agree.
-    if len(reasons) >= 3:
-        confidence = min(100.0, confidence + 5)
+    # Important: strong identifiers should not be diluted by noisy fields.
+    if "Mobile" in reasons and ("Name" in reasons or "Size" in reasons):
+        confidence = max(confidence, 92)
 
-    # Strong ID + size/name gives a very strong match.
-    if "Mobile" in reasons and ("Size" in reasons or "Name" in reasons):
-        confidence = min(100.0, confidence + 5)
+    if "SAP" in reasons and ("Name" in reasons or "Size" in reasons):
+        confidence = max(confidence, 94)
 
-    if "SAP" in reasons and ("Size" in reasons or "Name" in reasons):
-        confidence = min(100.0, confidence + 5)
+    # Name + mobile is highly reliable even if PPT has bad size text.
+    if "Mobile" in reasons and "Name" in reasons:
+        confidence = max(confidence, 96)
 
-    # Penalize explicit conflicts.
-    confidence = max(0.0, confidence + (sum(-8 for _ in conflicts)))
-
-    return confidence, reasons, conflicts
-
+    return round(confidence, 2), reasons, conflicts
 
 def get_missing_fields(excel_rec, ppt_rec):
     missing = []
@@ -669,71 +918,93 @@ def get_missing_fields(excel_rec, ppt_rec):
     return ", ".join(missing)
 
 
+
 def match_all(excel_records, ppt_records):
     """
-    Global greedy assignment:
-    1. Calculate every candidate score.
-    2. Sort strongest candidates first.
-    3. Assign each Excel row and PPT slide only once.
-    This prevents two Excel rows from consuming the same slide.
+    Two-stage matching:
+    Stage 1: exact strong identifiers.
+    Stage 2: global scored matching.
+    Duplicate outlet names are separated using size/media/qty where possible.
     """
+    results = {}
+    assigned_excel = set()
+    assigned_ppt = set()
+
+    # ---------- Stage 1: exact mobile ----------
+    mobile_map = {}
+    for p_idx, p in enumerate(ppt_records):
+        for mob in normalize_phones(p.get("mobile", "")):
+            mobile_map.setdefault(mob, []).append(p_idx)
+
+    for e_idx, e in enumerate(excel_records):
+        em = normalize_phones(e.get("mobile", ""))
+        if not em:
+            continue
+
+        candidate_idxs = []
+        for mob in em:
+            candidate_idxs.extend(mobile_map.get(mob, []))
+
+        candidate_idxs = [x for x in dict.fromkeys(candidate_idxs) if x not in assigned_ppt]
+        if len(candidate_idxs) == 1:
+            p_idx = candidate_idxs[0]
+            conf, reasons, conflicts = candidate_score(e, ppt_records[p_idx])
+            if conf >= 70:
+                results[e_idx] = {
+                    "ppt_idx": p_idx,
+                    "confidence": max(conf, 92),
+                    "reasons": reasons or ["Mobile"],
+                    "conflicts": conflicts
+                }
+                assigned_excel.add(e_idx)
+                assigned_ppt.add(p_idx)
+
+    # ---------- Stage 2: global scoring ----------
     candidates = []
 
     for e_idx, e in enumerate(excel_records):
+        if e_idx in assigned_excel:
+            continue
+
         for p_idx, p in enumerate(ppt_records):
-            confidence, reasons, conflicts = candidate_score(e, p)
-            if confidence > 0:
-                candidates.append(
-                    (confidence, e_idx, p_idx, reasons, conflicts)
-                )
+            if p_idx in assigned_ppt:
+                continue
+
+            conf, reasons, conflicts = candidate_score(e, p)
+            if conf > 0:
+                candidates.append((conf, e_idx, p_idx, reasons, conflicts))
 
     candidates.sort(reverse=True, key=lambda x: x[0])
 
-    assigned_excel = set()
-    assigned_ppt = set()
-    results = {}
-
-    for confidence, e_idx, p_idx, reasons, conflicts in candidates:
+    for conf, e_idx, p_idx, reasons, conflicts in candidates:
         if e_idx in assigned_excel or p_idx in assigned_ppt:
             continue
 
-        # Minimum confidence gate.
-        # Strong IDs can pass with 70+, otherwise require 78+.
-        strong_id = (
-            "Mobile" in reasons or
-            "SAP" in reasons
-        )
+        # Strong exact mobile/SAP can be accepted lower.
+        strong = "Mobile" in reasons or "SAP" in reasons
+        threshold = 70 if strong else 78
 
-        threshold = 70 if strong_id else 78
-
-        if confidence < threshold:
+        if conf < threshold:
             continue
 
-        # Check whether the next-best candidate is too close.
-        # If ambiguous, leave for review instead of forcing a match.
-        nearby = [
+        # Avoid ambiguous weak matches.
+        alternatives = [
             c for c in candidates
-            if c[1] == e_idx and c[2] != p_idx and c[0] >= confidence - 7
+            if c[1] == e_idx and c[2] != p_idx and c[0] >= conf - 8
         ]
-
-        if nearby and confidence < 90 and not strong_id:
+        if alternatives and conf < 88 and not strong:
             continue
 
-        assigned_excel.add(e_idx)
-        assigned_ppt.add(p_idx)
         results[e_idx] = {
             "ppt_idx": p_idx,
-            "confidence": round(confidence),
+            "confidence": conf,
             "reasons": reasons,
             "conflicts": conflicts
         }
+        assigned_excel.add(e_idx)
+        assigned_ppt.add(p_idx)
 
     return results, assigned_excel, assigned_ppt
-
-
-# ============================================================
-# EXCEL REPORT
-# ============================================================
 
 def autosize_worksheet(ws):
     for col_cells in ws.columns:
@@ -864,7 +1135,7 @@ def process_files(pptx_file, excel_file, progress, status):
     for i, slide in enumerate(slides):
         raw = extract_text_from_slide(slide)
         raw_slides.append(raw)
-        ppt_records.append(extract_slide_details(raw))
+        ppt_records.append(extract_slide_details(raw, slide))
         set_progress(progress, 22 + int((i + 1) / total * 23))
 
     status.write("🧠 Smart matching engine candidates calculate kar raha hai...")
@@ -1031,6 +1302,12 @@ def process_files(pptx_file, excel_file, progress, status):
     out_ppt = io.BytesIO()
     prs.save(out_ppt)
     out_ppt.seek(0)
+
+    # Final safety pass: remove any illegal XML/control characters from ALL cells.
+    for row_cells in ws.iter_rows():
+        for cell in row_cells:
+            if isinstance(cell.value, str):
+                cell.value = safe_excel_value(cell.value)
 
     # ---------------- Excel formatting ----------------
     autosize_worksheet(ws)
