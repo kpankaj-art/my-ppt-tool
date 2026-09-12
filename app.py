@@ -69,6 +69,39 @@ REPORT_COLUMNS = [
 # NORMALIZATION
 # ============================================================
 
+# Excel/OpenXML does not allow these control characters.
+def safe_excel_text(value):
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    # Remove XML 1.0 forbidden control characters, including vertical tab (\x0b).
+    return re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", "", str(value))
+
+
+def sanitize_dataframe_for_excel(df):
+    df = df.copy()
+    # Clean illegal characters from headers and make blank/duplicate headers safe.
+    new_cols = []
+    used = {}
+    for i, col in enumerate(df.columns, 1):
+        name = safe_excel_text(col).strip() or f"Column {i}"
+        if name in used:
+            used[name] += 1
+            name = f"{name}_{used[name]}"
+        else:
+            used[name] = 1
+        new_cols.append(name)
+    df.columns = new_cols
+
+    for col in df.columns:
+        df[col] = df[col].map(safe_excel_text)
+    return df
+
+
 def clean_text(value):
     if value is None:
         return ""
@@ -248,12 +281,13 @@ def load_excel(uploaded_file):
     data = uploaded_file.getvalue()
 
     if filename.endswith(".csv"):
-        return pd.read_csv(io.BytesIO(data), dtype=str).fillna("")
+        df = pd.read_csv(io.BytesIO(data), dtype=str).fillna("")
+    elif filename.endswith(".xls"):
+        df = pd.read_excel(io.BytesIO(data), dtype=str, engine="xlrd").fillna("")
+    else:
+        df = pd.read_excel(io.BytesIO(data), dtype=str, engine="openpyxl").fillna("")
 
-    if filename.endswith(".xls"):
-        return pd.read_excel(io.BytesIO(data), dtype=str, engine="xlrd").fillna("")
-
-    return pd.read_excel(io.BytesIO(data), dtype=str, engine="openpyxl").fillna("")
+    return sanitize_dataframe_for_excel(df)
 
 
 def dataframe_to_workbook(df):
@@ -269,7 +303,7 @@ def dataframe_to_workbook(df):
 
     for row_idx, row in enumerate(df.itertuples(index=False), 2):
         for col_idx, value in enumerate(row, 1):
-            ws.cell(row_idx, col_idx, value)
+            ws.cell(row_idx, col_idx, safe_excel_text(value))
 
     return wb
 
@@ -770,7 +804,7 @@ def add_extra_ppt_row(ws, col_map, mapping, details, slide_number):
 
         excel_col = col_map.get(str(col))
         if excel_col:
-            ws.cell(row_num, excel_col, value)
+            ws.cell(row_num, excel_col, safe_excel_text(value))
 
     # If no dedicated size column but width/height exist, those are already filled.
     # Add report fields.
