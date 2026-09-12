@@ -24,6 +24,11 @@ st.set_page_config(
 st.markdown("""
 <style>
 .stApp { background-color: #0e1117; }
+.stButton > button {
+    border-radius: 10px;
+    font-weight: 800;
+    min-height: 48px;
+}
 .css-card {
     background: linear-gradient(135deg, #1e2638 0%, #111827 100%);
     border: 1px solid #374151;
@@ -787,15 +792,24 @@ def add_extra_ppt_row(ws, col_map, mapping, details, slide_number):
 # MAIN PROCESS
 # ============================================================
 
+def set_progress(progress, value):
+    """Safe no-op progress hook for Streamlit Cloud compatibility."""
+    if progress is not None:
+        try:
+            progress.progress(value)
+        except Exception:
+            pass
+
+
 def process_files(pptx_file, excel_file, progress, status):
     status.write("⏳ Excel read ho rahi hai...")
-    progress.progress(8)
+    set_progress(progress, 8)
 
     df = load_excel(excel_file)
     mapping = detect_excel_columns(df)
 
     status.write("🔎 Excel columns identify ho rahe hain...")
-    progress.progress(15)
+    set_progress(progress, 15)
 
     excel_records = [
         build_excel_record(row, mapping, idx)
@@ -803,7 +817,7 @@ def process_files(pptx_file, excel_file, progress, status):
     ]
 
     status.write("📊 PowerPoint slides read ho rahi hain...")
-    progress.progress(22)
+    set_progress(progress, 22)
 
     prs = Presentation(pptx_file)
     slides = list(prs.slides)
@@ -817,16 +831,16 @@ def process_files(pptx_file, excel_file, progress, status):
         raw = extract_text_from_slide(slide)
         raw_slides.append(raw)
         ppt_records.append(extract_slide_details(raw))
-        progress.progress(22 + int((i + 1) / total * 23))
+        set_progress(progress, 22 + int((i + 1) / total * 23))
 
     status.write("🧠 Smart matching engine candidates calculate kar raha hai...")
-    progress.progress(48)
+    set_progress(progress, 48)
 
     results, matched_excel, matched_ppt = match_all(
         excel_records, ppt_records
     )
 
-    progress.progress(70)
+    set_progress(progress, 70)
     status.write("📝 Excel report generate ho rahi hai...")
 
     # Make a fresh workbook from original dataframe.
@@ -941,7 +955,7 @@ def process_files(pptx_file, excel_file, progress, status):
             # 🔴 Entire Excel row RED
             fill_entire_row(ws, excel_row, RED_FILL, RED_FONT)
 
-    progress.progress(82)
+    set_progress(progress, 82)
 
     # Add PPT extra slides as GREEN rows.
     extra_count = 0
@@ -957,7 +971,7 @@ def process_files(pptx_file, excel_file, progress, status):
             )
             extra_count += 1
 
-    progress.progress(92)
+    set_progress(progress, 92)
 
     # ---------------- PPT reorder ----------------
     matched_slide_indices = [
@@ -1000,7 +1014,7 @@ def process_files(pptx_file, excel_file, progress, status):
     wb.save(out_excel)
     out_excel.seek(0)
 
-    progress.progress(100)
+    set_progress(progress, 100)
     status.write("✅ Processing Complete!")
 
     matched_count = len(results)
@@ -1029,18 +1043,52 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+# -------------------- Upload UI --------------------
+st.markdown("""
+<style>
+.upload-label-red {
+    color: #ff4b4b !important;
+    font-size: 16px;
+    font-weight: 800;
+    margin-bottom: 6px;
+}
+.upload-label-green {
+    color: #22c55e !important;
+    font-size: 16px;
+    font-weight: 800;
+    margin-bottom: 6px;
+}
+.upload-box {
+    border-radius: 10px;
+    padding: 4px;
+}
+</style>
+""", unsafe_allow_html=True)
+
 left, right = st.columns(2)
 
 with left:
+    st.markdown(
+        '<div class="upload-label-red">1️⃣ Upload PowerPoint</div>',
+        unsafe_allow_html=True
+    )
     uploaded_pptx = st.file_uploader(
-        "1️⃣ Upload PowerPoint",
-        type=["pptx"]
+        "PowerPoint",
+        type=["pptx"],
+        label_visibility="collapsed",
+        key="ppt_upload"
     )
 
 with right:
+    st.markdown(
+        '<div class="upload-label-green">2️⃣ Upload Master Excel</div>',
+        unsafe_allow_html=True
+    )
     uploaded_excel = st.file_uploader(
-        "2️⃣ Upload Master Excel",
-        type=["xlsx", "xls", "csv"]
+        "Master Excel",
+        type=["xlsx", "xls", "csv"],
+        label_visibility="collapsed",
+        key="excel_upload"
     )
 
 st.caption(
@@ -1056,7 +1104,9 @@ if st.button(
     if not uploaded_pptx or not uploaded_excel:
         st.warning("⚠️ Kripya PowerPoint aur Excel dono upload karein.")
     else:
-        progress = st.progress(0)
+        # Streamlit Cloud compatibility: use a status placeholder instead
+        # of st.progress(), which can fail in some widget execution contexts.
+        progress = None
         status = st.empty()
 
         try:
@@ -1081,14 +1131,22 @@ if st.button(
             st.session_state["done"] = True
 
             time.sleep(0.4)
-            progress.empty()
+            if progress is not None:
+                try:
+                    progress.empty()
+                except Exception:
+                    pass
             status.empty()
 
         except Exception as e:
-            progress.empty()
+            if progress is not None:
+                try:
+                    progress.empty()
+                except Exception:
+                    pass
             status.empty()
             st.error(f"❌ Processing error: {e}")
-            st.exception(e)
+            st.caption("Tip: Agar error repeat ho, PPT/Excel file ka format check karein.")
 
 if st.session_state.get("done"):
     st.markdown("### 📊 Sync Result")
